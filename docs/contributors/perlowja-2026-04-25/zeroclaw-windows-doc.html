@@ -1,0 +1,2638 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>ZeroClaw Windows Setup — Doc Review</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Post-validation review of the upstream zeroclaw Windows setup doc against master HEAD 4ab49989 (v0.7.3), validated on TYPHON Windows 11 build 26200.8313.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        
+        
+        <style>
+/* css/variables-8adf115d.css */
+
+/* Globals */
+
+:root {
+    --sidebar-target-width: 300px;
+    --sidebar-width: min(var(--sidebar-target-width), 80vw);
+    --sidebar-resize-indicator-width: 8px;
+    --sidebar-resize-indicator-space: 2px;
+    --page-padding: 15px;
+    --content-max-width: 750px;
+    --menu-bar-height: 50px;
+    --mono-font: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace;
+    --code-font-size: 0.875em; /* please adjust the ace font size accordingly in editor.js */
+    --searchbar-margin-block-start: 5px;
+}
+
+/* Themes */
+
+.ayu {
+    --bg: hsl(210, 25%, 8%);
+    --fg: #c5c5c5;
+
+    --sidebar-bg: #14191f;
+    --sidebar-fg: #c8c9db;
+    --sidebar-non-existant: #5c6773;
+    --sidebar-active: #ffb454;
+    --sidebar-spacer: #2d334f;
+
+    --scrollbar: var(--sidebar-fg);
+
+    --icons: #737480;
+    --icons-hover: #b7b9cc;
+
+    --links: #0096cf;
+
+    --inline-code-color: #ffb454;
+
+    --theme-popup-bg: #14191f;
+    --theme-popup-border: #5c6773;
+    --theme-hover: #191f26;
+
+    --quote-bg: hsl(226, 15%, 17%);
+    --quote-border: hsl(226, 15%, 22%);
+
+    --warning-border: #ff8e00;
+
+    --table-border-color: hsl(210, 25%, 13%);
+    --table-header-bg: hsl(210, 25%, 28%);
+    --table-alternate-bg: hsl(210, 25%, 11%);
+
+    --searchbar-border-color: #848484;
+    --searchbar-bg: #424242;
+    --searchbar-fg: #fff;
+    --searchbar-shadow-color: #d4c89f;
+    --searchresults-header-fg: #666;
+    --searchresults-border-color: #888;
+    --searchresults-li-bg: #252932;
+    --search-mark-bg: #e3b171;
+
+    --color-scheme: dark;
+
+    /* Same as `--icons` */
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    /* Same as `--sidebar-active` */
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #2668a6;
+
+    --overlay-bg: rgba(33, 40, 48, 0.4);
+
+    --blockquote-note-color: #74b9ff;
+    --blockquote-tip-color: #09ca09;
+    --blockquote-important-color: #d3abff;
+    --blockquote-warning-color: #f0b72f;
+    --blockquote-caution-color: #f21424;
+
+    --sidebar-header-border-color: #c18639;
+}
+
+.coal {
+    --bg: hsl(200, 7%, 8%);
+    --fg: #98a3ad;
+
+    --sidebar-bg: #292c2f;
+    --sidebar-fg: #a1adb8;
+    --sidebar-non-existant: #505254;
+    --sidebar-active: #3473ad;
+    --sidebar-spacer: #393939;
+
+    --scrollbar: var(--sidebar-fg);
+
+    --icons: #43484d;
+    --icons-hover: #b3c0cc;
+
+    --links: #2b79a2;
+
+    --inline-code-color: #c5c8c6;
+
+    --theme-popup-bg: #141617;
+    --theme-popup-border: #43484d;
+    --theme-hover: #1f2124;
+
+    --quote-bg: hsl(234, 21%, 18%);
+    --quote-border: hsl(234, 21%, 23%);
+
+    --warning-border: #ff8e00;
+
+    --table-border-color: hsl(200, 7%, 13%);
+    --table-header-bg: hsl(200, 7%, 28%);
+    --table-alternate-bg: hsl(200, 7%, 11%);
+
+    --searchbar-border-color: #aaa;
+    --searchbar-bg: #b7b7b7;
+    --searchbar-fg: #000;
+    --searchbar-shadow-color: #aaa;
+    --searchresults-header-fg: #666;
+    --searchresults-border-color: #98a3ad;
+    --searchresults-li-bg: #2b2b2f;
+    --search-mark-bg: #355c7d;
+
+    --color-scheme: dark;
+
+    /* Same as `--icons` */
+    --copy-button-filter: invert(26%) sepia(8%) saturate(575%) hue-rotate(169deg) brightness(87%) contrast(82%);
+    /* Same as `--sidebar-active` */
+    --copy-button-filter-hover: invert(36%) sepia(70%) saturate(503%) hue-rotate(167deg) brightness(98%) contrast(89%);
+
+    --footnote-highlight: #4079ae;
+
+    --overlay-bg: rgba(33, 40, 48, 0.4);
+
+    --blockquote-note-color: #4493f8;
+    --blockquote-tip-color: #08ae08;
+    --blockquote-important-color: #ab7df8;
+    --blockquote-warning-color: #d29922;
+    --blockquote-caution-color: #d91b29;
+
+    --sidebar-header-border-color: #3473ad;
+}
+
+.light, html:not(.js) {
+    --bg: hsl(0, 0%, 100%);
+    --fg: hsl(0, 0%, 0%);
+
+    --sidebar-bg: #fafafa;
+    --sidebar-fg: hsl(0, 0%, 0%);
+    --sidebar-non-existant: #aaaaaa;
+    --sidebar-active: #1f1fff;
+    --sidebar-spacer: #f4f4f4;
+
+    --scrollbar: #8F8F8F;
+
+    --icons: #747474;
+    --icons-hover: #000000;
+
+    --links: #20609f;
+
+    --inline-code-color: #301900;
+
+    --theme-popup-bg: #fafafa;
+    --theme-popup-border: #cccccc;
+    --theme-hover: #e6e6e6;
+
+    --quote-bg: hsl(197, 37%, 96%);
+    --quote-border: hsl(197, 37%, 91%);
+
+    --warning-border: #ff8e00;
+
+    --table-border-color: hsl(0, 0%, 95%);
+    --table-header-bg: hsl(0, 0%, 80%);
+    --table-alternate-bg: hsl(0, 0%, 97%);
+
+    --searchbar-border-color: #aaa;
+    --searchbar-bg: #fafafa;
+    --searchbar-fg: #000;
+    --searchbar-shadow-color: #aaa;
+    --searchresults-header-fg: #666;
+    --searchresults-border-color: #888;
+    --searchresults-li-bg: #e4f2fe;
+    --search-mark-bg: #a2cff5;
+
+    --color-scheme: light;
+
+    /* Same as `--icons` */
+    --copy-button-filter: invert(45.49%);
+    /* Same as `--sidebar-active` */
+    --copy-button-filter-hover: invert(14%) sepia(93%) saturate(4250%) hue-rotate(243deg) brightness(99%) contrast(130%);
+
+    --footnote-highlight: #7e7eff;
+
+    --overlay-bg: rgba(200, 200, 205, 0.4);
+
+    --blockquote-note-color: #0969da;
+    --blockquote-tip-color: #008000;
+    --blockquote-important-color: #8250df;
+    --blockquote-warning-color: #9a6700;
+    --blockquote-caution-color: #b52731;
+
+    --sidebar-header-border-color: #6e6edb;
+}
+
+.navy {
+    --bg: hsl(226, 23%, 11%);
+    --fg: #bcbdd0;
+
+    --sidebar-bg: #282d3f;
+    --sidebar-fg: #c8c9db;
+    --sidebar-non-existant: #505274;
+    --sidebar-active: #2b79a2;
+    --sidebar-spacer: #2d334f;
+
+    --scrollbar: var(--sidebar-fg);
+
+    --icons: #737480;
+    --icons-hover: #b7b9cc;
+
+    --links: #2b79a2;
+
+    --inline-code-color: #c5c8c6;
+
+    --theme-popup-bg: #161923;
+    --theme-popup-border: #737480;
+    --theme-hover: #282e40;
+
+    --quote-bg: hsl(226, 15%, 17%);
+    --quote-border: hsl(226, 15%, 22%);
+
+    --warning-border: #ff8e00;
+
+    --table-border-color: hsl(226, 23%, 16%);
+    --table-header-bg: hsl(226, 23%, 31%);
+    --table-alternate-bg: hsl(226, 23%, 14%);
+
+    --searchbar-border-color: #aaa;
+    --searchbar-bg: #aeaec6;
+    --searchbar-fg: #000;
+    --searchbar-shadow-color: #aaa;
+    --searchresults-header-fg: #5f5f71;
+    --searchresults-border-color: #5c5c68;
+    --searchresults-li-bg: #242430;
+    --search-mark-bg: #a2cff5;
+
+    --color-scheme: dark;
+
+    /* Same as `--icons` */
+    --copy-button-filter: invert(51%) sepia(10%) saturate(393%) hue-rotate(198deg) brightness(86%) contrast(87%);
+    /* Same as `--sidebar-active` */
+    --copy-button-filter-hover: invert(46%) sepia(20%) saturate(1537%) hue-rotate(156deg) brightness(85%) contrast(90%);
+
+    --footnote-highlight: #4079ae;
+
+    --overlay-bg: rgba(33, 40, 48, 0.4);
+
+    --blockquote-note-color: #4493f8;
+    --blockquote-tip-color: #09ca09;
+    --blockquote-important-color: #ab7df8;
+    --blockquote-warning-color: #d29922;
+    --blockquote-caution-color: #f21424;
+
+    --sidebar-header-border-color: #2f6ab5;
+}
+
+.rust {
+    --bg: hsl(60, 9%, 87%);
+    --fg: #262625;
+
+    --sidebar-bg: #3b2e2a;
+    --sidebar-fg: #c8c9db;
+    --sidebar-non-existant: #505254;
+    --sidebar-active: #e69f67;
+    --sidebar-spacer: #45373a;
+
+    --scrollbar: var(--sidebar-fg);
+
+    --icons: #737480;
+    --icons-hover: #262625;
+
+    --links: #2b79a2;
+
+    --inline-code-color: #6e6b5e;
+
+    --theme-popup-bg: #e1e1db;
+    --theme-popup-border: #b38f6b;
+    --theme-hover: #99908a;
+
+    --quote-bg: hsl(60, 5%, 75%);
+    --quote-border: hsl(60, 5%, 70%);
+
+    --warning-border: #ff8e00;
+
+    --table-border-color: hsl(60, 9%, 82%);
+    --table-header-bg: #b3a497;
+    --table-alternate-bg: hsl(60, 9%, 84%);
+
+    --searchbar-border-color: #aaa;
+    --searchbar-bg: #fafafa;
+    --searchbar-fg: #000;
+    --searchbar-shadow-color: #aaa;
+    --searchresults-header-fg: #666;
+    --searchresults-border-color: #888;
+    --searchresults-li-bg: #dec2a2;
+    --search-mark-bg: #e69f67;
+
+    /* Same as `--icons` */
+    --copy-button-filter: invert(51%) sepia(10%) saturate(393%) hue-rotate(198deg) brightness(86%) contrast(87%);
+    /* Same as `--sidebar-active` */
+    --copy-button-filter-hover: invert(77%) sepia(16%) saturate(1798%) hue-rotate(328deg) brightness(98%) contrast(83%);
+
+    --footnote-highlight: #d3a17a;
+
+    --overlay-bg: rgba(150, 150, 150, 0.25);
+
+    --blockquote-note-color: #023b95;
+    --blockquote-tip-color: #007700;
+    --blockquote-important-color: #8250df;
+    --blockquote-warning-color: #603700;
+    --blockquote-caution-color: #aa1721;
+
+    --sidebar-header-border-color: #8c391f;
+}
+
+@media (prefers-color-scheme: dark) {
+    html:not(.js) {
+        --bg: hsl(200, 7%, 8%);
+        --fg: #98a3ad;
+
+        --sidebar-bg: #292c2f;
+        --sidebar-fg: #a1adb8;
+        --sidebar-non-existant: #505254;
+        --sidebar-active: #3473ad;
+        --sidebar-spacer: #393939;
+
+        --scrollbar: var(--sidebar-fg);
+
+        --icons: #43484d;
+        --icons-hover: #b3c0cc;
+
+        --links: #2b79a2;
+
+        --inline-code-color: #c5c8c6;
+
+        --theme-popup-bg: #141617;
+        --theme-popup-border: #43484d;
+        --theme-hover: #1f2124;
+
+        --quote-bg: hsl(234, 21%, 18%);
+        --quote-border: hsl(234, 21%, 23%);
+
+        --warning-border: #ff8e00;
+
+        --table-border-color: hsl(200, 7%, 13%);
+        --table-header-bg: hsl(200, 7%, 28%);
+        --table-alternate-bg: hsl(200, 7%, 11%);
+
+        --searchbar-border-color: #aaa;
+        --searchbar-bg: #b7b7b7;
+        --searchbar-fg: #000;
+        --searchbar-shadow-color: #aaa;
+        --searchresults-header-fg: #666;
+        --searchresults-border-color: #98a3ad;
+        --searchresults-li-bg: #2b2b2f;
+        --search-mark-bg: #355c7d;
+
+        --color-scheme: dark;
+
+        /* Same as `--icons` */
+        --copy-button-filter: invert(26%) sepia(8%) saturate(575%) hue-rotate(169deg) brightness(87%) contrast(82%);
+        /* Same as `--sidebar-active` */
+        --copy-button-filter-hover: invert(36%) sepia(70%) saturate(503%) hue-rotate(167deg) brightness(98%) contrast(89%);
+
+        --footnote-highlight: #4079ae;
+
+        --overlay-bg: rgba(33, 40, 48, 0.4);
+
+        --blockquote-note-color: #4493f8;
+        --blockquote-tip-color: #08ae08;
+        --blockquote-important-color: #ab7df8;
+        --blockquote-warning-color: #d29922;
+        --blockquote-caution-color: #d91b29;
+
+        --sidebar-header-border-color: #3473ad;
+    }
+}
+
+</style>
+        <style>
+/* css/general-2459343d.css */
+/* Base styles and content styles */
+
+:root {
+    /* Browser default font-size is 16px, this way 1 rem = 10px */
+    font-size: 62.5%;
+    color-scheme: var(--color-scheme);
+}
+
+html {
+    font-family: "Open Sans", sans-serif;
+    color: var(--fg);
+    background-color: var(--bg);
+    text-size-adjust: none;
+    -webkit-text-size-adjust: none;
+}
+
+body {
+    margin: 0;
+    font-size: 1.6rem;
+    overflow-x: hidden;
+}
+
+code {
+    font-family: var(--mono-font) !important;
+    font-size: var(--code-font-size);
+    direction: ltr !important;
+}
+
+/* make long words/inline code not x overflow */
+main {
+    overflow-wrap: break-word;
+}
+
+/* make wide tables scroll if they overflow */
+.table-wrapper {
+    overflow-x: auto;
+}
+
+/* Don't change font size in headers. */
+h1 code, h2 code, h3 code, h4 code, h5 code, h6 code {
+    font-size: unset;
+}
+
+.left { float: left; }
+.right { float: right; }
+.boring { opacity: 0.6; }
+.hide-boring .boring { display: none; }
+.hidden { display: none !important; }
+
+h2, h3 { margin-block-start: 2.5em; }
+h4, h5 { margin-block-start: 2em; }
+
+.header + .header h3,
+.header + .header h4,
+.header + .header h5 {
+    margin-block-start: 1em;
+}
+
+h1:target::before,
+h2:target::before,
+h3:target::before,
+h4:target::before,
+h5:target::before,
+h6:target::before,
+dt:target::before {
+    display: inline-block;
+    content: "»";
+    margin-inline-start: -30px;
+    width: 30px;
+}
+
+/* This is broken on Safari as of version 14, but is fixed
+   in Safari Technology Preview 117 which I think will be Safari 14.2.
+   https://bugs.webkit.org/show_bug.cgi?id=218076
+*/
+:target {
+    /* Safari does not support logical properties */
+    scroll-margin-top: calc(var(--menu-bar-height) + 0.5em);
+}
+
+.page {
+    outline: 0;
+    padding: 0 var(--page-padding);
+    margin-block-start: calc(0px - var(--menu-bar-height)); /* Compensate for the #mdbook-menu-bar-hover-placeholder */
+}
+.page-wrapper {
+    box-sizing: border-box;
+    background-color: var(--bg);
+}
+html:not(.js) .page-wrapper,
+.js:not(.sidebar-resizing) .page-wrapper {
+    transition: margin-left 0.3s ease, transform 0.3s ease; /* Animation: slide away */
+}
+[dir=rtl]:not(.js) .page-wrapper,
+[dir=rtl].js:not(.sidebar-resizing) .page-wrapper {
+    transition: margin-right 0.3s ease, transform 0.3s ease; /* Animation: slide away */
+}
+
+.content {
+    overflow-y: auto;
+    padding: 0 5px 50px 5px;
+}
+.content main {
+    margin-inline-start: auto;
+    margin-inline-end: auto;
+    max-width: var(--content-max-width);
+}
+.content p { line-height: 1.45em; }
+.content ol { line-height: 1.45em; }
+.content ul { line-height: 1.45em; }
+.content a { text-decoration: none; }
+.content a:hover { text-decoration: underline; }
+.content img, .content video { max-width: 100%; }
+.content .header:link,
+.content .header:visited {
+    color: var(--fg);
+}
+.content .header:link,
+.content .header:visited:hover {
+    text-decoration: none;
+}
+
+table {
+    margin: 0 auto;
+    border-collapse: collapse;
+}
+table td {
+    padding: 3px 20px;
+    border: 1px var(--table-border-color) solid;
+}
+table thead {
+    background: var(--table-header-bg);
+}
+table thead td {
+    font-weight: 700;
+    border: none;
+}
+table thead th {
+    padding: 3px 20px;
+}
+table thead tr {
+    border: 1px var(--table-header-bg) solid;
+}
+/* Alternate background colors for rows */
+table tbody tr:nth-child(2n) {
+    background: var(--table-alternate-bg);
+}
+
+
+blockquote {
+    margin: 20px 0;
+    padding: 0 20px;
+    color: var(--fg);
+    background-color: var(--quote-bg);
+    border-block-start: .1em solid var(--quote-border);
+    border-block-end: .1em solid var(--quote-border);
+}
+
+/* TODO: Remove .warning in a future version of mdbook, it is replaced by
+blockquote tags. */
+.warning {
+    margin: 20px;
+    padding: 0 20px;
+    border-inline-start: 2px solid var(--warning-border);
+}
+
+.warning:before {
+    position: absolute;
+    width: 3rem;
+    height: 3rem;
+    margin-inline-start: calc(-1.5rem - 21px);
+    content: "ⓘ";
+    text-align: center;
+    background-color: var(--bg);
+    color: var(--warning-border);
+    font-weight: bold;
+    font-size: 2rem;
+}
+
+blockquote .warning:before {
+    background-color: var(--quote-bg);
+}
+
+kbd {
+    background-color: var(--table-border-color);
+    border-radius: 4px;
+    border: solid 1px var(--theme-popup-border);
+    box-shadow: inset 0 -1px 0 var(--theme-hover);
+    display: inline-block;
+    font-size: var(--code-font-size);
+    font-family: var(--mono-font);
+    line-height: 10px;
+    padding: 4px 5px;
+    vertical-align: middle;
+}
+
+sup {
+    /* Set the line-height for superscript and footnote references so that there
+       isn't an awkward space appearing above lines that contain the footnote.
+
+       See https://github.com/rust-lang/mdBook/pull/2443#discussion_r1813773583
+       for an explanation.
+    */
+    line-height: 0;
+}
+
+.footnote-definition {
+    font-size: 0.9em;
+}
+/* The default spacing for a list is a little too large. */
+.footnote-definition ul,
+.footnote-definition ol {
+    padding-left: 20px;
+}
+.footnote-definition > li {
+    /* Required to position the ::before target */
+    position: relative;
+}
+.footnote-definition > li:target {
+    scroll-margin-top: 50vh;
+}
+.footnote-reference:target {
+    scroll-margin-top: 50vh;
+}
+/* Draws a border around the footnote (including the marker) when it is selected.
+   TODO: If there are multiple linkbacks, highlight which one you just came
+   from so you know which one to click.
+*/
+.footnote-definition > li:target::before {
+    border: 2px solid var(--footnote-highlight);
+    border-radius: 6px;
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    bottom: -8px;
+    left: -32px;
+    pointer-events: none;
+    content: "";
+}
+/* Pulses the footnote reference so you can quickly see where you left off reading.
+   This could use some improvement.
+*/
+@media not (prefers-reduced-motion) {
+    .footnote-reference:target  {
+        animation: fn-highlight 0.8s;
+        border-radius: 2px;
+    }
+
+    @keyframes fn-highlight {
+        from {
+            background-color: var(--footnote-highlight);
+        }
+    }
+}
+
+.tooltiptext {
+    position: absolute;
+    visibility: hidden;
+    color: #fff;
+    background-color: #333;
+    transform: translateX(-50%); /* Center by moving tooltip 50% of its width left */
+    left: -8px; /* Half of the width of the icon */
+    top: -35px;
+    font-size: 0.8em;
+    text-align: center;
+    border-radius: 6px;
+    padding: 5px 8px;
+    margin: 5px;
+    z-index: 1000;
+}
+.tooltipped .tooltiptext {
+    visibility: visible;
+}
+
+.chapter li.part-title {
+    color: var(--sidebar-fg);
+    margin: 5px 0px;
+    font-weight: bold;
+}
+
+.result-no-output {
+    font-style: italic;
+}
+
+.fa-svg svg {
+    width: 1em;
+    height: 1em;
+    fill: currentColor;
+    margin-bottom: -0.1em;
+}
+
+dt {
+    font-weight: bold;
+    margin-top: 0.5em;
+    margin-bottom: 0.1em;
+}
+
+/* This uses a CSS counter to add numbers to definitions, but only if there is
+ more than one definition. */
+dl, dt {
+    counter-reset: dd-counter;
+}
+
+/* When there is more than one definition, increment the counter. The first
+selector selects the first definition, and the second one selects definitions
+2 and beyond.*/
+dd:has(+ dd), dd + dd {
+    counter-increment: dd-counter;
+    /* Use flex display to help with positioning the numbers when there is a p
+    tag inside the definition. */
+    display: flex;
+    align-items: flex-start;
+}
+
+/* Shows the counter for definitions. The first selector selects the first
+definition, and the second one selections definitions 2 and beyond.*/
+dd:has(+ dd)::before, dd + dd::before  {
+    content: counter(dd-counter) ". ";
+    font-weight: 600;
+    display: inline-block;
+    margin-right: 0.5em;
+}
+
+dd > p {
+    /* For loose definitions that have a p tag inside, don't add a bunch of
+    space before the definition. */
+    margin-top: 0;
+}
+
+/* Remove some excess space from the bottom. */
+.blockquote-tag p:last-child {
+    margin-bottom: 2px;
+}
+
+.blockquote-tag {
+    /* Add some padding to make the vertical bar a little taller than the text.*/
+    padding: 2px 0px 2px 20px;
+    /* Add a solid color bar on the left side. */
+    border-inline-start-style: solid;
+    border-inline-start-width: 4px;
+    /* Disable the background color from normal blockquotes . */
+    background-color: inherit;
+    /* Disable border blocks from blockquotes. */
+    border-block-start: none;
+    border-block-end: none;
+}
+
+.blockquote-tag-title svg {
+    fill: currentColor;
+    /* Add space between the icon and the title. */
+    margin-right: 8px;
+}
+
+.blockquote-tag-note {
+    border-inline-start-color: var(--blockquote-note-color);
+}
+
+.blockquote-tag-tip {
+    border-inline-start-color: var(--blockquote-tip-color);
+}
+
+.blockquote-tag-important {
+    border-inline-start-color: var(--blockquote-important-color);
+}
+
+.blockquote-tag-warning {
+    border-inline-start-color: var(--blockquote-warning-color);
+}
+
+.blockquote-tag-caution {
+    border-inline-start-color: var(--blockquote-caution-color);
+}
+
+.blockquote-tag-note .blockquote-tag-title {
+    color: var(--blockquote-note-color);
+}
+
+.blockquote-tag-tip .blockquote-tag-title {
+    color: var(--blockquote-tip-color);
+}
+
+.blockquote-tag-important .blockquote-tag-title {
+    color: var(--blockquote-important-color);
+}
+
+.blockquote-tag-warning .blockquote-tag-title {
+    color: var(--blockquote-warning-color);
+}
+
+.blockquote-tag-caution .blockquote-tag-title {
+    color: var(--blockquote-caution-color);
+}
+
+.blockquote-tag-title {
+    /* Slightly increase the weight for more emphasis. */
+    font-weight: 600;
+    /* Vertically center the icon with the text. */
+    display: flex;
+    align-items: center;
+    /* Remove default large margins for a more compact display. */
+    margin: 2px 0 8px 0;
+}
+
+.blockquote-tag-title .fa-svg {
+    fill: currentColor;
+    /* Add some space between the icon and the text. */
+    margin-right: 8px;
+}
+
+</style>
+        <style>
+/* css/chrome-ae938929.css */
+/* CSS for UI elements (a.k.a. chrome) */
+
+html {
+    scrollbar-color: var(--scrollbar) transparent;
+}
+#mdbook-searchresults a,
+.content a:link,
+a:visited,
+a > .hljs {
+    color: var(--links);
+}
+
+/*
+    mdbook-body-container is necessary because mobile browsers don't seem to like
+    overflow-x on the body tag when there is a <meta name="viewport"> tag.
+*/
+#mdbook-body-container {
+    /*
+        This is used when the sidebar pushes the body content off the side of
+        the screen on small screens. Without it, dragging on mobile Safari
+        will want to reposition the viewport in a weird way.
+    */
+    overflow-x: clip;
+}
+
+/* Menu Bar */
+
+#mdbook-menu-bar,
+#mdbook-menu-bar-hover-placeholder {
+    z-index: 101;
+    margin: auto calc(0px - var(--page-padding));
+}
+#mdbook-menu-bar {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    background-color: var(--bg);
+    border-block-end-color: var(--bg);
+    border-block-end-width: 1px;
+    border-block-end-style: solid;
+}
+#mdbook-menu-bar.sticky,
+#mdbook-menu-bar-hover-placeholder:hover + #mdbook-menu-bar,
+#mdbook-menu-bar:hover,
+html.sidebar-visible #mdbook-menu-bar {
+    position: -webkit-sticky;
+    position: sticky;
+    top: 0 !important;
+}
+#mdbook-menu-bar-hover-placeholder {
+    position: sticky;
+    position: -webkit-sticky;
+    top: 0;
+    height: var(--menu-bar-height);
+}
+#mdbook-menu-bar.bordered {
+    border-block-end-color: var(--table-border-color);
+}
+#mdbook-menu-bar .fa-svg, #mdbook-menu-bar .icon-button {
+    position: relative;
+    padding: 0 8px;
+    z-index: 10;
+    line-height: var(--menu-bar-height);
+    cursor: pointer;
+    transition: color 0.5s;
+}
+@media only screen and (max-width: 420px) {
+    #mdbook-menu-bar .fa-svg, #mdbook-menu-bar .icon-button {
+        padding: 0 5px;
+    }
+}
+
+.icon-button {
+    border: none;
+    background: none;
+    padding: 0;
+    color: inherit;
+}
+.icon-button .fa-svg {
+    margin: 0;
+}
+
+.right-buttons {
+    margin: 0 15px;
+}
+.right-buttons a {
+    text-decoration: none;
+}
+
+.left-buttons {
+    display: flex;
+    margin: 0 5px;
+}
+html:not(.js) .left-buttons button {
+    display: none;
+}
+
+.menu-title {
+    display: inline-block;
+    font-weight: 200;
+    font-size: 2.4rem;
+    line-height: var(--menu-bar-height);
+    text-align: center;
+    margin: 0;
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.menu-title {
+    cursor: pointer;
+}
+
+.menu-bar,
+.menu-bar:visited,
+.nav-chapters,
+.nav-chapters:visited,
+.mobile-nav-chapters,
+.mobile-nav-chapters:visited,
+.menu-bar .icon-button,
+.menu-bar a .fa-svg {
+    color: var(--icons);
+}
+
+.menu-bar .fa-svg:hover,
+.menu-bar .icon-button:hover,
+.nav-chapters:hover,
+.mobile-nav-chapters .fa-svg:hover {
+    color: var(--icons-hover);
+}
+
+/* Nav Icons */
+
+.nav-chapters {
+    font-size: 2.5em;
+    text-align: center;
+    text-decoration: none;
+
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    margin: 0;
+    max-width: 150px;
+    min-width: 90px;
+
+    display: flex;
+    justify-content: center;
+    align-content: center;
+    flex-direction: column;
+
+    transition: color 0.5s, background-color 0.5s;
+}
+
+.nav-chapters:hover {
+    text-decoration: none;
+    background-color: var(--theme-hover);
+    transition: background-color 0.15s, color 0.15s;
+}
+
+.nav-wrapper {
+    margin-block-start: 50px;
+    display: none;
+}
+
+.mobile-nav-chapters {
+    font-size: 2.5em;
+    text-align: center;
+    text-decoration: none;
+    width: 90px;
+    border-radius: 5px;
+    background-color: var(--sidebar-bg);
+}
+
+/* Only Firefox supports flow-relative values */
+.previous { float: left; }
+[dir=rtl] .previous { float: right; }
+
+/* Only Firefox supports flow-relative values */
+.next {
+    float: right;
+    right: var(--page-padding);
+}
+[dir=rtl] .next {
+    float: left;
+    right: unset;
+    left: var(--page-padding);
+}
+
+@media only screen and (max-width: 1080px) {
+    .nav-wide-wrapper { display: none; }
+    .nav-wrapper { display: block; }
+}
+
+/* sidebar-visible */
+@media only screen and (max-width: 1380px) {
+    #mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper .nav-wide-wrapper { display: none; }
+    #mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper .nav-wrapper { display: block; }
+}
+
+/* Inline code */
+
+:not(pre) > .hljs {
+    display: inline;
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+}
+
+:not(pre):not(a) > .hljs {
+    color: var(--inline-code-color);
+    overflow-x: initial;
+}
+
+a:hover > .hljs {
+    text-decoration: underline;
+}
+
+pre {
+    position: relative;
+}
+pre > .buttons {
+    position: absolute;
+    z-index: 100;
+    right: 0px;
+    top: 2px;
+    margin: 0px;
+    padding: 2px 0px;
+
+    color: var(--sidebar-fg);
+    cursor: pointer;
+    visibility: hidden;
+    opacity: 0;
+    transition: visibility 0.1s linear, opacity 0.1s linear;
+}
+pre:hover > .buttons {
+    visibility: visible;
+    opacity: 1
+}
+pre > .buttons :hover {
+    color: var(--sidebar-active);
+    border-color: var(--icons-hover);
+    background-color: var(--theme-hover);
+}
+pre > .buttons button {
+    cursor: inherit;
+    margin: 0px 5px;
+    padding: 2px 3px 0px 4px;
+    font-size: 23px;
+
+    border-style: solid;
+    border-width: 1px;
+    border-radius: 4px;
+    border-color: var(--icons);
+    background-color: var(--theme-popup-bg);
+    transition: 100ms;
+    transition-property: color,border-color,background-color;
+    color: var(--icons);
+}
+
+pre > .buttons button.clip-button {
+    padding: 2px 4px 0px 6px;
+}
+pre > .buttons button.clip-button::before {
+    /* clipboard image from octicons (https://github.com/primer/octicons/tree/v2.0.0) MIT license
+     */
+    content: url('data:image/svg+xml,<svg width="21" height="20" viewBox="0 0 24 25" \
+xmlns="http://www.w3.org/2000/svg" aria-label="Copy to clipboard">\
+<path d="M18 20h2v3c0 1-1 2-2 2H2c-.998 0-2-1-2-2V5c0-.911.755-1.667 1.667-1.667h5A3.323 3.323 0 \
+0110 0a3.323 3.323 0 013.333 3.333h5C19.245 3.333 20 4.09 20 5v8.333h-2V9H2v14h16v-3zM3 \
+7h14c0-.911-.793-1.667-1.75-1.667H13.5c-.957 0-1.75-.755-1.75-1.666C11.75 2.755 10.957 2 10 \
+2s-1.75.755-1.75 1.667c0 .911-.793 1.666-1.75 1.666H4.75C3.793 5.333 3 6.09 3 7z"/>\
+<path d="M4 19h6v2H4zM12 11H4v2h8zM4 17h4v-2H4zM15 15v-3l-4.5 4.5L15 21v-3l8.027-.032L23 15z"/>\
+</svg>');
+    filter: var(--copy-button-filter);
+}
+pre > .buttons button.clip-button:hover::before {
+    filter: var(--copy-button-filter-hover);
+}
+
+@media (pointer: coarse) {
+    pre > .buttons button {
+        /* On mobile, make it easier to tap buttons. */
+        padding: 0.3rem 1rem;
+    }
+
+    .sidebar-resize-indicator {
+        /* Hide resize indicator on devices with limited accuracy */
+        display: none;
+    }
+}
+pre > code {
+    display: block;
+    padding: 1rem;
+}
+
+/* FIXME: ACE editors overlap their buttons because ACE does absolute
+   positioning within the code block which breaks padding. The only solution I
+   can think of is to move the padding to the outer pre tag (or insert a div
+   wrapper), but that would require fixing a whole bunch of CSS rules.
+*/
+.hljs.ace_editor {
+  padding: 0rem 0rem;
+}
+
+pre > .result {
+    margin-block-start: 10px;
+}
+
+/* Search */
+
+#mdbook-searchresults a {
+    text-decoration: none;
+}
+
+mark {
+    border-radius: 2px;
+    padding-block-start: 0;
+    padding-block-end: 1px;
+    padding-inline-start: 3px;
+    padding-inline-end: 3px;
+    margin-block-start: 0;
+    margin-block-end: -1px;
+    margin-inline-start: -3px;
+    margin-inline-end: -3px;
+    background-color: var(--search-mark-bg);
+    transition: background-color 300ms linear;
+    cursor: pointer;
+}
+
+mark.fade-out {
+    background-color: rgba(0,0,0,0) !important;
+    cursor: auto;
+}
+
+.searchbar-outer {
+    margin-inline-start: auto;
+    margin-inline-end: auto;
+    max-width: var(--content-max-width);
+}
+
+#mdbook-searchbar-outer.searching #mdbook-searchbar {
+    padding-right: 30px;
+}
+#mdbook-searchbar-outer .spinner-wrapper {
+    display: none;
+}
+#mdbook-searchbar-outer.searching .spinner-wrapper {
+    display: block;
+}
+
+.search-wrapper {
+    position: relative;
+}
+
+.spinner-wrapper {
+    --spinner-margin: 2px;
+    position: absolute;
+    margin-block-start: calc(var(--searchbar-margin-block-start) + var(--spinner-margin));
+    right: var(--spinner-margin);
+    top: 0;
+    bottom: var(--spinner-margin);
+    padding: 6px;
+    background-color: var(--bg);
+}
+
+#fa-spin {
+    animation: rotating 2s linear infinite;
+    display: inline-block;
+}
+
+@keyframes rotating {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+#mdbook-searchbar {
+    width: 100%;
+    margin-block-start: var(--searchbar-margin-block-start);
+    margin-block-end: 0;
+    margin-inline-start: auto;
+    margin-inline-end: auto;
+    padding: 10px 16px;
+    transition: box-shadow 300ms ease-in-out;
+    border: 1px solid var(--searchbar-border-color);
+    border-radius: 3px;
+    background-color: var(--searchbar-bg);
+    color: var(--searchbar-fg);
+}
+#mdbook-searchbar:focus,
+#mdbook-searchbar.active {
+    box-shadow: 0 0 3px var(--searchbar-shadow-color);
+}
+
+.searchresults-header {
+    font-weight: bold;
+    font-size: 1em;
+    padding-block-start: 18px;
+    padding-block-end: 0;
+    padding-inline-start: 5px;
+    padding-inline-end: 0;
+    color: var(--searchresults-header-fg);
+}
+
+.searchresults-outer {
+    margin-inline-start: auto;
+    margin-inline-end: auto;
+    max-width: var(--content-max-width);
+    border-block-end: 1px dashed var(--searchresults-border-color);
+}
+
+ul#mdbook-searchresults {
+    list-style: none;
+    padding-inline-start: 20px;
+}
+ul#mdbook-searchresults li {
+    margin: 10px 0px;
+    padding: 2px;
+    border-radius: 2px;
+}
+ul#mdbook-searchresults li.focus {
+    background-color: var(--searchresults-li-bg);
+}
+ul#mdbook-searchresults span.teaser {
+    display: block;
+    clear: both;
+    margin-block-start: 5px;
+    margin-block-end: 0;
+    margin-inline-start: 20px;
+    margin-inline-end: 0;
+    font-size: 0.8em;
+}
+ul#mdbook-searchresults span.teaser em {
+    font-weight: bold;
+    font-style: normal;
+}
+
+/* Sidebar */
+
+.sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--sidebar-width);
+    font-size: 0.875em;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+    background-color: var(--sidebar-bg);
+    color: var(--sidebar-fg);
+}
+.sidebar-iframe-inner {
+    --padding: 10px;
+
+    background-color: var(--sidebar-bg);
+    padding: var(--padding);
+    margin: 0;
+    font-size: 1.4rem;
+    color: var(--sidebar-fg);
+    min-height: calc(100vh - var(--padding) * 2);
+}
+.sidebar-iframe-outer {
+    border: none;
+    height: 100%;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+}
+[dir=rtl] .sidebar { left: unset; right: 0; }
+.sidebar-resizing {
+    -moz-user-select: none;
+    -webkit-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+}
+html:not(.sidebar-resizing) .sidebar {
+    transition: transform 0.3s; /* Animation: slide away */
+}
+.sidebar code {
+    line-height: 2em;
+}
+.sidebar .sidebar-scrollbox {
+    overflow-y: auto;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 10px 10px;
+}
+.sidebar .sidebar-resize-handle {
+    position: absolute;
+    cursor: col-resize;
+    width: 0;
+    right: calc(var(--sidebar-resize-indicator-width) * -1);
+    top: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+}
+
+.sidebar-resize-handle .sidebar-resize-indicator {
+    width: 100%;
+    height: 16px;
+    color: var(--icons);
+    margin-inline-start: var(--sidebar-resize-indicator-space);
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+}
+.sidebar-resize-handle .sidebar-resize-indicator::before {
+    content: "";
+    width: 2px;
+    height: 12px;
+    border-left: dotted 2px currentColor;
+}
+.sidebar-resize-handle .sidebar-resize-indicator::after {
+    content: "";
+    width: 2px;
+    height: 16px;
+    border-left: dotted 2px currentColor;
+}
+
+[dir=rtl] .sidebar .sidebar-resize-handle {
+    left: calc(var(--sidebar-resize-indicator-width) * -1);
+    right: unset;
+}
+.js .sidebar .sidebar-resize-handle {
+    cursor: col-resize;
+    width: calc(var(--sidebar-resize-indicator-width) - var(--sidebar-resize-indicator-space));
+}
+
+html:not(.js) .sidebar-resize-handle {
+    display: none;
+}
+
+/* sidebar-hidden */
+#mdbook-sidebar-toggle-anchor:not(:checked) ~ .sidebar {
+    transform: translateX(calc(0px - var(--sidebar-width) - var(--sidebar-resize-indicator-width)));
+}
+[dir=rtl] #mdbook-sidebar-toggle-anchor:not(:checked) ~ .sidebar {
+    transform: translateX(calc(var(--sidebar-width) + var(--sidebar-resize-indicator-width)));
+}
+.sidebar::-webkit-scrollbar {
+    background: var(--sidebar-bg);
+}
+.sidebar::-webkit-scrollbar-thumb {
+    background: var(--scrollbar);
+}
+
+/* sidebar-visible */
+#mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper {
+    transform: translateX(calc(var(--sidebar-width) + var(--sidebar-resize-indicator-width)));
+}
+[dir=rtl] #mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper {
+    transform: translateX(calc(0px - var(--sidebar-width) - var(--sidebar-resize-indicator-width)));
+}
+@media only screen and (min-width: 620px) {
+    #mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper {
+        transform: none;
+        margin-inline-start: calc(var(--sidebar-width) + var(--sidebar-resize-indicator-width));
+    }
+    [dir=rtl] #mdbook-sidebar-toggle-anchor:checked ~ .page-wrapper {
+        transform: none;
+    }
+}
+
+.chapter {
+    list-style: none outside none;
+    padding-inline-start: 0;
+    line-height: 2.2em;
+}
+
+.chapter li {
+    color: var(--sidebar-non-existant);
+}
+
+/* This is a span wrapping the chapter link and the fold chevron. */
+.chapter-link-wrapper {
+    /* Used to position the chevron to the right, allowing the text to wrap before it. */
+    display: flex;
+}
+
+.chapter li a {
+    /* Remove underlines. */
+    text-decoration: none;
+    color: var(--sidebar-fg);
+}
+
+.chapter li a:hover {
+    color: var(--sidebar-active);
+}
+
+.chapter li a.active {
+    color: var(--sidebar-active);
+}
+
+/* This is the toggle chevron. */
+.chapter-fold-toggle {
+    cursor: pointer;
+    /* Positions the chevron to the side. */
+    margin-inline-start: auto;
+    padding: 0 10px;
+    user-select: none;
+    opacity: 0.68;
+}
+
+.chapter-fold-toggle div {
+    transition: transform 0.5s;
+}
+
+/* collapse the section */
+.chapter li:not(.expanded) > ol {
+    display: none;
+}
+
+.chapter li.chapter-item {
+    line-height: 1.5em;
+    margin-block-start: 0.6em;
+}
+
+/* When expanded, rotate the chevron to point down. */
+.chapter li.expanded > span > .chapter-fold-toggle div {
+    transform: rotate(90deg);
+}
+
+.chapter a.current-header {
+    color: var(--sidebar-active);
+}
+
+.on-this-page {
+    margin-left: 22px;
+    border-inline-start: 4px solid var(--sidebar-header-border-color);
+    padding-left: 8px;
+}
+
+.on-this-page > ol {
+    padding-left: 0;
+}
+
+/* Horizontal line in chapter list. */
+.spacer {
+    width: 100%;
+    height: 3px;
+    margin: 5px 0px;
+}
+.chapter .spacer {
+    background-color: var(--sidebar-spacer);
+}
+
+/* On touch devices, add more vertical spacing to make it easier to tap links. */
+@media (-moz-touch-enabled: 1), (pointer: coarse) {
+    .chapter li a { padding: 5px 0; }
+    .spacer { margin: 10px 0; }
+}
+
+.section {
+    list-style: none outside none;
+    padding-inline-start: 20px;
+    line-height: 1.9em;
+}
+
+/* Theme Menu Popup */
+
+.theme-popup {
+    position: absolute;
+    left: 10px;
+    top: var(--menu-bar-height);
+    z-index: 1000;
+    border-radius: 4px;
+    font-size: 0.7em;
+    color: var(--fg);
+    background: var(--theme-popup-bg);
+    border: 1px solid var(--theme-popup-border);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: none;
+    /* Don't let the children's background extend past the rounded corners. */
+    overflow: hidden;
+}
+[dir=rtl] .theme-popup { left: unset;  right: 10px; }
+.theme-popup .default {
+    color: var(--icons);
+}
+.theme-popup .theme {
+    width: 100%;
+    border: 0;
+    margin: 0;
+    padding: 2px 20px;
+    line-height: 25px;
+    white-space: nowrap;
+    text-align: start;
+    cursor: pointer;
+    color: inherit;
+    background: inherit;
+    font-size: inherit;
+}
+.theme-popup .theme:hover {
+    background-color: var(--theme-hover);
+}
+
+.theme-selected::before {
+    display: inline-block;
+    content: "✓";
+    margin-inline-start: -14px;
+    width: 14px;
+}
+
+/* The container for the help popup that covers the whole window. */
+#mdbook-help-container {
+    /* Position and size for the whole window. */
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* This uses flex layout (which is set in book.js), and centers the popup
+       in the window.*/
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    /* Dim out the book while the popup is visible. */
+    background: var(--overlay-bg);
+}
+
+/* The popup help box. */
+#mdbook-help-popup {
+    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    min-width: 300px;
+    max-width: 500px;
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background-color: var(--bg);
+    color: var(--fg);
+    border-width: 1px;
+    border-color: var(--theme-popup-border);
+    border-style: solid;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.mdbook-help-title {
+    text-align: center;
+    /* mdbook's margin for h2 is way too large. */
+    margin: 10px;
+}
+
+</style>
+        <style>
+/* css/print-9e4910d8.css */
+
+#mdbook-sidebar,
+#mdbook-menu-bar,
+.nav-chapters,
+.mobile-nav-chapters {
+    display: none;
+}
+
+#mdbook-page-wrapper.page-wrapper {
+    transform: none !important;
+    margin-inline-start: 0px;
+    overflow-y: initial;
+}
+
+#mdbook-content {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+}
+
+.page {
+    overflow-y: initial;
+}
+
+code {
+    direction: ltr !important;
+}
+
+pre > .buttons {
+    z-index: 2;
+}
+
+a, a:visited, a:active, a:hover {
+    color: #4183c4;
+    text-decoration: none;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    page-break-inside: avoid;
+    page-break-after: avoid;
+}
+
+pre, code {
+    page-break-inside: avoid;
+    white-space: pre-wrap;
+}
+
+.fa {
+    display: none !important;
+}
+
+</style>
+
+        <!-- Fonts -->
+        <style>
+/* fonts/fonts-9644e21d.css */
+/* Open Sans is licensed under the Apache License, Version 2.0. See http://www.apache.org/licenses/LICENSE-2.0 */
+/* Source Code Pro is under the Open Font License. See https://scripts.sil.org/cms/scripts/page.php?site_id=nrsi&id=OFL */
+
+/* open-sans-300 - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 300;
+  src: local('Open Sans Light'), local('OpenSans-Light'),
+       url('../fonts/open-sans-v17-all-charsets-300-7736aa35.woff2') format('woff2');
+}
+
+/* open-sans-300italic - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 300;
+  src: local('Open Sans Light Italic'), local('OpenSans-LightItalic'),
+       url('../fonts/open-sans-v17-all-charsets-300italic-2c7b95c0.woff2') format('woff2');
+}
+
+/* open-sans-regular - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 400;
+  src: local('Open Sans Regular'), local('OpenSans-Regular'),
+       url('../fonts/open-sans-v17-all-charsets-regular-2e3b1d34.woff2') format('woff2');
+}
+
+/* open-sans-italic - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 400;
+  src: local('Open Sans Italic'), local('OpenSans-Italic'),
+       url('../fonts/open-sans-v17-all-charsets-italic-6c9463f7.woff2') format('woff2');
+}
+
+/* open-sans-600 - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 600;
+  src: local('Open Sans SemiBold'), local('OpenSans-SemiBold'),
+       url('../fonts/open-sans-v17-all-charsets-600-486c6759.woff2') format('woff2');
+}
+
+/* open-sans-600italic - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 600;
+  src: local('Open Sans SemiBold Italic'), local('OpenSans-SemiBoldItalic'),
+       url('../fonts/open-sans-v17-all-charsets-600italic-1a3e8659.woff2') format('woff2');
+}
+
+/* open-sans-700 - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 700;
+  src: local('Open Sans Bold'), local('OpenSans-Bold'),
+       url('../fonts/open-sans-v17-all-charsets-700-c22fe8c7.woff2') format('woff2');
+}
+
+/* open-sans-700italic - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 700;
+  src: local('Open Sans Bold Italic'), local('OpenSans-BoldItalic'),
+       url('../fonts/open-sans-v17-all-charsets-700italic-238ae959.woff2') format('woff2');
+}
+
+/* open-sans-800 - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 800;
+  src: local('Open Sans ExtraBold'), local('OpenSans-ExtraBold'),
+       url('../fonts/open-sans-v17-all-charsets-800-3d2c812a.woff2') format('woff2');
+}
+
+/* open-sans-800italic - latin_vietnamese_latin-ext_greek-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 800;
+  src: local('Open Sans ExtraBold Italic'), local('OpenSans-ExtraBoldItalic'),
+       url('../fonts/open-sans-v17-all-charsets-800italic-ba1521ec.woff2') format('woff2');
+}
+
+/* source-code-pro-500 - latin_vietnamese_latin-ext_greek_cyrillic-ext_cyrillic */
+@font-face {
+  font-family: 'Source Code Pro';
+  font-style: normal;
+  font-weight: 500;
+  src: url('../fonts/source-code-pro-v11-all-charsets-500-2bdd9410.woff2') format('woff2');
+}
+
+</style>
+
+        <!-- Highlight.js Stylesheets -->
+        <style>
+/* highlight-493f70e1.css */
+/*
+ * An increased contrast highlighting scheme loosely based on the
+ * "Base16 Atelier Dune Light" theme by Bram de Haan
+ * (http://atelierbram.github.io/syntax-highlighting/atelier-schemes/dune)
+ * Original Base16 color scheme by Chris Kempson
+ * (https://github.com/chriskempson/base16)
+ */
+
+/* Comment */
+.hljs-comment,
+.hljs-quote {
+  color: #575757;
+}
+
+/* Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attribute,
+.hljs-attr,
+.hljs-tag,
+.hljs-name,
+.hljs-regexp,
+.hljs-link,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #d70025;
+}
+
+/* Orange */
+.hljs-number,
+.hljs-meta,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params {
+  color: #b21e00;
+}
+
+/* Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet {
+  color: #008200;
+}
+
+/* Blue */
+.hljs-title,
+.hljs-section {
+  color: #0030f2;
+}
+
+/* Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+  color: #9d00ec;
+}
+
+.hljs {
+  display: block;
+  overflow-x: auto;
+  background: #f6f7f6;
+  color: #000;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
+
+.hljs-addition {
+  color: #22863a;
+  background-color: #f0fff4;
+}
+
+.hljs-deletion {
+  color: #b31d28;
+  background-color: #ffeef0;
+}
+
+</style>
+        <style>
+/* tomorrow-night-4c0ae647.css */
+/* Tomorrow Night Theme */
+/* https://github.com/jmblog/color-themes-for-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+/* https://github.com/jmblog/color-themes-for-highlightjs */
+
+/* Tomorrow Comment */
+.hljs-comment {
+  color: #969896;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-attribute,
+.hljs-attr,
+.hljs-tag,
+.hljs-regexp,
+.ruby .hljs-constant,
+.xml .hljs-tag .hljs-title,
+.xml .hljs-pi,
+.xml .hljs-doctype,
+.html .hljs-doctype,
+.css .hljs-id,
+.css .hljs-class,
+.css .hljs-pseudo {
+  color: #cc6666;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-preprocessor,
+.hljs-pragma,
+.hljs-built_in,
+.hljs-literal,
+.hljs-params,
+.hljs-constant {
+  color: #de935f;
+}
+
+/* Tomorrow Yellow */
+.ruby .hljs-class .hljs-title,
+.css .hljs-rule .hljs-attribute {
+  color: #f0c674;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-value,
+.hljs-inheritance,
+.hljs-header,
+.hljs-name,
+.ruby .hljs-symbol,
+.xml .hljs-cdata {
+  color: #b5bd68;
+}
+
+/* Tomorrow Aqua */
+.hljs-title,
+.hljs-section,
+.css .hljs-hexcolor {
+  color: #8abeb7;
+}
+
+/* Tomorrow Blue */
+.hljs-function,
+.python .hljs-decorator,
+.python .hljs-title,
+.ruby .hljs-function .hljs-title,
+.ruby .hljs-title .hljs-keyword,
+.perl .hljs-sub,
+.javascript .hljs-title,
+.coffeescript .hljs-title {
+  color: #81a2be;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.javascript .hljs-function {
+  color: #b294bb;
+}
+
+.hljs {
+  display: block;
+  overflow-x: auto;
+  background: #1d1f21;
+  color: #c5c8c6;
+}
+
+.coffeescript .javascript,
+.javascript .xml,
+.tex .hljs-formula,
+.xml .javascript,
+.xml .vbscript,
+.xml .css,
+.xml .hljs-cdata {
+  opacity: 0.5;
+}
+
+.hljs-addition {
+  color: #718c00;
+}
+
+.hljs-deletion {
+  color: #c82829;
+}
+
+</style>
+        <style>
+/* ayu-highlight-3fdfc3ac.css */
+/*
+Based off of the Ayu theme
+Original by Dempfi (https://github.com/dempfi/ayu)
+*/
+
+.hljs {
+  display: block;
+  overflow-x: auto;
+  background: #191f26;
+  color: #e6e1cf;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #5c6773;
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attribute,
+.hljs-attr,
+.hljs-regexp,
+.hljs-link,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #ff7733;
+}
+
+.hljs-number,
+.hljs-meta,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params {
+  color: #ffee99;
+}
+
+.hljs-string,
+.hljs-bullet {
+  color: #b8cc52;
+}
+
+.hljs-title,
+.hljs-built_in,
+.hljs-section {
+  color: #ffb454;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-symbol {
+  color: #ff7733;
+}
+
+.hljs-name {
+    color: #36a3d9;
+}
+
+.hljs-tag {
+    color: #00568d;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
+
+.hljs-addition {
+  color: #91b362;
+}
+
+.hljs-deletion {
+  color: #d96c75;
+}
+
+</style>
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-5f98e51c.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">ZeroClaw Windows Setup — Doc Review</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="windows"><a class="header" href="#windows">Windows</a></h1>
+<p>Install, update, run as a Windows scheduled task, and uninstall on Windows 10 / 11.</p>
+<p>If you’re running WSL2, you can follow the Linux setup instead — <code>install.sh</code> runs unchanged under WSL.</p>
+<blockquote>
+<p><strong>Note on <code>setup.bat</code>.</strong> The release <code>setup.bat</code> wrapper has known bugs that prevent it from completing on Windows 11 with drives larger than ~2 TB (32-bit overflow in the disk-space pre-flight check) and on shells that strictly parse <code>if/else</code> blocks (unescaped parens in an echo). Until those land in a release, the <strong>manual prebuilt</strong> path (Option 1 below) is the recommended install. Building from source (Option 3) also works.</p>
+</blockquote>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
+<h3 id="option-1--prebuilt-binary-recommended"><a class="header" href="#option-1--prebuilt-binary-recommended">Option 1 — Prebuilt binary (recommended)</a></h3>
+<p>Download the latest Windows release zip, extract <code>zeroclaw.exe</code>, and put it on your <code>PATH</code>.</p>
+<p>From a PowerShell prompt:</p>
+<pre><code class="language-powershell">$ver = '0.7.3'   # current; check https://github.com/zeroclaw-labs/zeroclaw/releases/latest
+$url = "https://github.com/zeroclaw-labs/zeroclaw/releases/download/v$ver/zeroclaw-x86_64-pc-windows-msvc.zip"
+$dst = "$env:USERPROFILE\.zeroclaw\bin"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\zeroclaw.zip" -UseBasicParsing
+Expand-Archive -Force -Path "$env:TEMP\zeroclaw.zip" -DestinationPath $dst
+[Environment]::SetEnvironmentVariable('Path', "$dst;$([Environment]::GetEnvironmentVariable('Path','User'))", 'User')
+&amp; "$dst\zeroclaw.exe" onboard
+</code></pre>
+<p>The zip ships a self-contained binary — no Rust toolchain, no Visual Studio Build Tools needed.</p>
+<p>After install, verify:</p>
+<pre><code class="language-powershell">zeroclaw --version    # should report 0.7.3 (or whatever you installed)
+</code></pre>
+<h3 id="option-2--setupbat-from-a-release"><a class="header" href="#option-2--setupbat-from-a-release">Option 2 — <code>setup.bat</code> (from a release)</a></h3>
+<pre><code class="language-cmd">setup.bat --prebuilt
+</code></pre>
+<p>Flags:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Flag</th><th>Behaviour</th></tr>
+</thead>
+<tbody>
+<tr><td><code>--prebuilt</code></td><td>Download prebuilt binary from GitHub Releases (fastest — no Rust toolchain needed)</td></tr>
+<tr><td><code>--minimal</code></td><td>Build core only (no channels, no hardware)</td></tr>
+<tr><td><code>--standard</code></td><td>Build with common channels (Telegram, Discord, Slack, Matrix)</td></tr>
+<tr><td><code>--full</code></td><td>Build everything</td></tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<p>⚠️ <strong>Known issues.</strong> As of v0.7.3, <code>setup.bat</code> may abort during prerequisite checks on Windows 11 with drives larger than ~2 TB or with shells that strictly parse parens inside <code>if/else</code> blocks. If you see <code>Invalid number. Numbers are limited to 32-bits of precision.</code> or <code>.[0m was unexpected at this time.</code>, fall back to <strong>Option 1</strong> above.</p>
+</blockquote>
+<h3 id="option-3--from-source"><a class="header" href="#option-3--from-source">Option 3 — From source</a></h3>
+<p>Requires Rust (<code>rustup</code>) and Visual Studio Build Tools:</p>
+<pre><code class="language-cmd">git clone https://github.com/zeroclaw-labs/zeroclaw
+cd zeroclaw
+cargo install --locked --path .
+zeroclaw onboard
+</code></pre>
+<h3 id="option-4--scoop-currently-stale"><a class="header" href="#option-4--scoop-currently-stale">Option 4 — Scoop (currently stale)</a></h3>
+<blockquote>
+<p>⚠️ <strong>The Scoop manifest in the repo is pinned to v0.5.9</strong> (23 patch releases behind master). Until a release-time CI hook bumps it, prefer Option 1 or 3. If you do use Scoop and hit issues, please open a PR against <code>dist/scoop/zeroclaw.json</code>.</p>
+</blockquote>
+<pre><code>scoop install zeroclaw     # currently installs an older release; see warning above
+zeroclaw onboard
+</code></pre>
+<h3 id="option-5--docker"><a class="header" href="#option-5--docker">Option 5 — Docker</a></h3>
+<p>ZeroClaw publishes a Linux container image at <strong><code>ghcr.io/zeroclaw-labs/zeroclaw:latest</code></strong> (and <code>:vX.Y.Z</code> for tagged releases). On Windows, run it via Docker Desktop or via <code>sudo apt install docker.io</code> inside a WSL distro — both work, the container behaviour is identical.</p>
+<p>Quick start:</p>
+<pre><code class="language-powershell"># Persistent volume for config + workspace; ZeroClaw's data dir inside the container is /zeroclaw-data
+docker run -d --name zeroclaw `
+  --restart=unless-stopped `
+  -p 42617:42617 `
+  -v zeroclaw-data:/zeroclaw-data `
+  ghcr.io/zeroclaw-labs/zeroclaw:latest
+
+# Watch the first-run logs — a one-time pairing code is printed
+docker logs -f zeroclaw
+
+# Health check (no auth)
+curl http://localhost:42617/health
+
+# Pair a client (use the code from `docker logs`)
+curl -X POST http://localhost:42617/pair -H 'X-Pairing-Code: &lt;code-from-logs&gt;'
+</code></pre>
+<p><strong>Image facts (verified against <code>ghcr.io/zeroclaw-labs/zeroclaw:latest</code>):</strong></p>
+<ul>
+<li><strong>Base:</strong> <code>gcr.io/distroless/cc-debian13:nonroot</code> (release stage; the <code>dev</code> stage is <code>debian:trixie-slim</code>)</li>
+<li><strong><code>ENTRYPOINT ["zeroclaw"]</code></strong>, <code>CMD ["daemon"]</code> — running with no args starts the daemon and gateway</li>
+<li><strong><code>EXPOSE 42617</code></strong> — both the daemon and gateway listen on this port</li>
+<li><strong>Data dir:</strong> <code>/zeroclaw-data</code> (config: <code>/zeroclaw-data/.zeroclaw/config.toml</code>, workspace: <code>/zeroclaw-data/workspace</code>). Mount a named volume or bind here for persistence — note this is <strong>not</strong> <code>/root/.zeroclaw</code>.</li>
+<li><strong>Pairing:</strong> the daemon prints a one-time pairing code to stdout on first start; clients POST to <code>/pair</code> with that code in the <code>X-Pairing-Code</code> header before any authenticated endpoint will respond.</li>
+<li><strong>Web dashboard:</strong> disabled by default in the published image. To enable, build the frontend (<code>cd web &amp;&amp; npm ci &amp;&amp; npm run build</code>) and set <code>gateway.web_dist_dir</code> in config or <code>ZEROCLAW_WEB_DIST_DIR</code> env.</li>
+</ul>
+<p>Build from source against the bundled Dockerfile:</p>
+<pre><code class="language-powershell">git clone https://github.com/zeroclaw-labs/zeroclaw
+cd zeroclaw
+docker build -t zeroclaw:local -f Dockerfile.debian .
+</code></pre>
+<p><strong>Verified on Windows + Docker:</strong></p>
+<ul>
+<li><strong>Container behaviour matches Linux.</strong> Pulled and ran <code>ghcr.io/zeroclaw-labs/zeroclaw:latest</code> in WSL Debian on Windows 11 build 26200.8313. Image starts cleanly, gateway listens on <code>:42617</code>, <code>/health</code> returns valid JSON, pairing-code flow works.</li>
+<li><strong>Docker without Docker Desktop.</strong> <code>wsl --install</code> to enable WSL2, then <code>sudo apt install docker.io</code> inside the WSL distro, gives you the daemon directly — verified pulls and runs the published image without modification.</li>
+</ul>
+<p><strong>Host-side best practices</strong> — general Docker + WSL2 guidance, not zeroclaw-specific runtime claims. Sourced from Microsoft Learn and Docker’s own docs where applicable:</p>
+<ul>
+<li><strong>Volume mounts.</strong> Bind-mounting Windows-side paths (<code>-v C:/Users/...:/zeroclaw-data</code>) into a Linux container crosses the WSL2 ⇄ Windows filesystem boundary; Microsoft documents the layout and the cross-OS path implications in the <a href="https://learn.microsoft.com/en-us/windows/wsl/filesystems">WSL file systems</a> reference. Prefer Docker named volumes (<code>-v zeroclaw-data:/zeroclaw-data</code>) or store the workspace inside the WSL filesystem (<code>\\wsl$\Debian\home\...</code>) for near-native performance.</li>
+<li><strong>Networking.</strong> Default WSL2 networking is NAT’d — services in the container are reachable from Windows via <code>localhost:&lt;port&gt;</code> after <code>-p</code> forwarding (verified on TYPHON). If you need to reach the container from another box on the LAN, or run multi-container setups where intra-container DNS matters, switch to mirrored mode per Microsoft’s <a href="https://learn.microsoft.com/en-us/windows/wsl/networking#mirrored-mode-networking">Mirrored mode networking</a> reference, by adding to <code>%USERPROFILE%\.wslconfig</code>:
+<pre><code>[wsl2]
+networkingMode=mirrored
+</code></pre>
+</li>
+<li><strong>Daemon under Docker, not Task Scheduler.</strong> Inside the container there is no Windows Task Scheduler. Use Docker’s <a href="https://docs.docker.com/engine/containers/start-containers-automatically/">restart policy</a> — <code>--restart=unless-stopped</code> as in the example above — for daemon-mode startup. The published image runs as PID 1 / nonroot user; the container <em>is</em> the service — don’t run <code>zeroclaw service install</code> inside it.</li>
+<li><strong>Skill sandbox via host Docker socket.</strong> ZeroClaw’s skill-execution sandbox can shell out to Docker. If you’re running ZeroClaw itself in a container and want skill sandboxing to also use Docker, mount the host Docker socket so child containers run on the host daemon rather than nesting Docker-in-Docker:
+<pre><code>-v //var/run/docker.sock:/var/run/docker.sock
+</code></pre>
+Be aware that mounting the Docker socket grants root-equivalent host access to anything inside the container — Docker’s <a href="https://docs.docker.com/engine/security/protect-access/">Protect the Docker daemon socket</a> page covers the trade-off. On Docker Desktop for Windows, the host socket is <code>\\.\pipe\docker_engine</code>; the bind-mount syntax above translates correctly. The pattern is general; it has not been benchmarked specifically against zeroclaw’s skill sandbox in this doc.</li>
+<li><strong>Resource limits.</strong> Docker Desktop on Windows allocates RAM/CPU via <code>%USERPROFILE%\.wslconfig</code>, which defaults to half host RAM. The full configuration surface is documented in Microsoft’s <a href="https://learn.microsoft.com/en-us/windows/wsl/wsl-config">Advanced settings configuration in WSL</a> reference. A reasonable starting envelope for a single-user ZeroClaw deployment is:
+<pre><code>[wsl2]
+memory=8GB
+processors=4
+</code></pre>
+Bump up if you’re running heavy skill workloads or local LLM inference inside the same WSL distro; this is sizing guidance, not a hard requirement of the image.</li>
+</ul>
+<h2 id="system-dependencies"><a class="header" href="#system-dependencies">System dependencies</a></h2>
+<p>Windows builds use the MSVC toolchain. To build from source you need:</p>
+<ul>
+<li>Visual Studio Build Tools (or full Visual Studio) with the “Desktop development with C++” workload</li>
+<li>Rust stable (via <code>rustup</code>)</li>
+</ul>
+<p>If you’re using <strong>Option 1</strong> or <strong>Option 2 <code>--prebuilt</code></strong> you don’t need the Rust toolchain — the binary is self-contained.</p>
+<h2 id="running-as-a-service"><a class="header" href="#running-as-a-service">Running as a service</a></h2>
+<p>On Windows, ZeroClaw installs as a <strong>user-scoped scheduled task</strong> named <code>ZeroClaw Daemon</code>. There is no Windows Service / LocalSystem option in the current release — the underlying code path always installs a scheduled task, regardless of whether <code>zeroclaw service install</code> is run from an elevated or non-elevated shell.</p>
+<pre><code class="language-cmd">zeroclaw service install
+zeroclaw service start
+</code></pre>
+<p>This creates a task in Task Scheduler (<code>taskschd.msc</code>) under your user account that starts on login. Manage it via:</p>
+<pre><code class="language-cmd">zeroclaw service status
+zeroclaw service restart
+zeroclaw service stop
+zeroclaw service logs
+</code></pre>
+<blockquote>
+<p><strong>About <code>--service-init</code>.</strong> The CLI exposes a <code>--service-init [auto|systemd|openrc]</code> flag for cross-platform consistency, but on Windows it is a no-op — the scheduled-task path is always used.</p>
+</blockquote>
+<p>Logs go to <code>%USERPROFILE%\.zeroclaw\logs\</code> (specifically, <code>&lt;config_dir&gt;/logs/</code> where <code>&lt;config_dir&gt;</code> defaults to <code>%USERPROFILE%\.zeroclaw\</code>). The wrapper script that the scheduled task runs is at <code>%USERPROFILE%\.zeroclaw\logs\zeroclaw-daemon.cmd</code>.</p>
+<blockquote>
+<p><strong>Server / multi-user installs.</strong> Native Windows Service / LocalSystem support is on the roadmap but not yet implemented. For now, on a server box, install ZeroClaw under the account that the agent should run as; the scheduled-task path will start it on that user’s login. If you need it to start before any user logs in, use <strong>Task Scheduler → ZeroClaw Daemon → Properties → General → “Run whether user is logged on or not.”</strong></p>
+</blockquote>
+<h2 id="update"><a class="header" href="#update">Update</a></h2>
+<h3 id="manual-option-1-path"><a class="header" href="#manual-option-1-path">Manual (Option 1 path)</a></h3>
+<p>Re-run the PowerShell install block from <strong>Option 1</strong> with the new <code>$ver</code>. The new zip overwrites the existing <code>zeroclaw.exe</code> in place. Then:</p>
+<pre><code class="language-powershell">zeroclaw service restart
+</code></pre>
+<h3 id="setupbat"><a class="header" href="#setupbat"><code>setup.bat</code></a></h3>
+<p>Re-download the latest release and re-run <code>setup.bat --prebuilt</code> (or whichever flag you used originally). Then:</p>
+<pre><code class="language-cmd">zeroclaw service restart
+</code></pre>
+<h3 id="scoop"><a class="header" href="#scoop">Scoop</a></h3>
+<pre><code>scoop update zeroclaw       # subject to the staleness caveat above
+zeroclaw service restart
+</code></pre>
+<h3 id="from-source"><a class="header" href="#from-source">From source</a></h3>
+<pre><code class="language-cmd">cd C:\path\to\zeroclaw
+git pull
+cargo install --locked --path . --force
+zeroclaw service restart
+</code></pre>
+<h2 id="uninstall"><a class="header" href="#uninstall">Uninstall</a></h2>
+<p>Stop and remove the scheduled task:</p>
+<pre><code class="language-cmd">zeroclaw service stop
+zeroclaw service uninstall
+</code></pre>
+<p>Remove the binary:</p>
+<pre><code class="language-cmd">:: Option 1 (manual prebuilt) or setup.bat
+rmdir /s /q "%USERPROFILE%\.zeroclaw\bin"
+
+:: Option 3 (cargo install)
+del "%USERPROFILE%\.cargo\bin\zeroclaw.exe"
+
+:: Option 4 (Scoop)
+scoop uninstall zeroclaw
+</code></pre>
+<p>Remove config, workspace, and logs (optional — this deletes conversation history):</p>
+<pre><code class="language-cmd">rmdir /s /q "%USERPROFILE%\.zeroclaw"
+</code></pre>
+<blockquote>
+<p>The previous version of this doc referenced <code>%LOCALAPPDATA%\ZeroClaw\</code> — that path is <strong>not</strong> used by the current release; only <code>%USERPROFILE%\.zeroclaw\</code> is.</p>
+</blockquote>
+<h2 id="gotchas"><a class="header" href="#gotchas">Gotchas</a></h2>
+<ul>
+<li>
+<p><strong>Long paths.</strong> Some Windows file systems still cap path lengths at 260 characters. Enable long path support if you hit <code>path too long</code> errors during a source build:</p>
+<pre><code>reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f
+</code></pre>
+</li>
+<li>
+<p><strong>SmartScreen.</strong> The unsigned binary may trip SmartScreen on first launch from Explorer (double-click). Right-click → Properties → “Unblock” is the standard workaround until we add a signed MSI. Launching from PowerShell or <code>cmd.exe</code> typically does not trigger SmartScreen.</p>
+</li>
+<li>
+<p><strong>Task Scheduler stop-at-idle / battery.</strong> By default Windows may terminate scheduled tasks on idle or battery. The installed <code>ZeroClaw Daemon</code> task disables these conditions, but if you’ve installed via an older release you can verify under <strong>Task Scheduler → ZeroClaw Daemon → Properties → Conditions</strong>:</p>
+<ul>
+<li>“Start the task only if the computer is on AC power” — unchecked</li>
+<li>“Stop if the computer switches to battery power” — unchecked</li>
+<li>“Start the task only if the computer is idle for…” — unchecked</li>
+</ul>
+</li>
+<li>
+<p><strong><code>set /a</code> on &gt;2 TB drives</strong> <em>(setup.bat only)</em>. The disk-space pre-flight check in <code>setup.bat</code> uses 32-bit cmd arithmetic and overflows on free-space readings above ~2 GB. Use Option 1 (manual prebuilt) until this is fixed in a release.</p>
+</li>
+<li>
+<p><strong>OpenSSH password auth.</strong> If you’re driving Windows over SSH and pubkey isn’t accepted, drop your key into <code>C:\Users\&lt;user&gt;\.ssh\authorized_keys</code> (regular user) or <code>C:\ProgramData\ssh\administrators_authorized_keys</code> (when logged in as a member of <code>Administrators</code>).</p>
+</li>
+</ul>
+<h2 id="next"><a class="header" href="#next">Next</a></h2>
+<ul>
+<li>Service management</li>
+<li>Quick start</li>
+<li>Operations → Overview</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="zeroclaw-windows-setup-doc--review-against-current-master"><a class="header" href="#zeroclaw-windows-setup-doc--review-against-current-master">zeroclaw Windows setup doc — review against current master</a></h1>
+<p><strong>Doc URL:</strong> https://singlerider.github.io/zeroclaw/en/setup/windows.html
+<strong>Cross-check target:</strong> <code>zeroclaw-labs/zeroclaw:master</code> HEAD <code>4ab49989</code> (Cargo.toml <code>version = "0.7.3"</code>).
+<strong>Source-of-truth bits inspected:</strong> <code>setup.bat</code>, <code>crates/zeroclaw-runtime/src/service/mod.rs</code> (1693 LOC), <code>dist/scoop/zeroclaw.json</code>, <code>src/main.rs</code> ServiceCommands.</p>
+<p><strong>Status:</strong> Post-validation update 2026-04-25 — all original findings re-verified on TYPHON Windows 11 build 26200.8313 with PowerShell 5.1 + Rust 1.95.0 + Git for Windows. Five new findings added during live run.</p>
+<hr>
+<h2 id="1-scoop-manifest-is-severely-stale--high-confirmed"><a class="header" href="#1-scoop-manifest-is-severely-stale--high-confirmed">1. Scoop manifest is severely stale — HIGH (CONFIRMED)</a></h2>
+<p><code>dist/scoop/zeroclaw.json</code> claims:</p>
+<pre><code class="language-json">"version": "0.5.9",
+"url": "https://github.com/zeroclaw-labs/zeroclaw/releases/download/v0.5.9/zeroclaw-x86_64-pc-windows-msvc.zip"
+</code></pre>
+<p>Live verification (<code>findstr /n version dist\scoop\zeroclaw.json</code>):</p>
+<pre><code>2:    "version": "0.5.9",
+8:    "url": "...releases/download/v0.5.9/zeroclaw-x86_64-pc-windows-msvc.zip",
+</code></pre>
+<p>Current Cargo.toml: <code>version = "0.7.3"</code>. Manifest is <strong>23 patch releases behind</strong> master.
+GitHub <code>releases/latest</code> confirms tag = <code>v0.7.3</code> (artifact <code>zeroclaw-x86_64-pc-windows-msvc.zip</code> 13.3 MB present).</p>
+<p><strong>Fix candidates:</strong> (a) bump <code>dist/scoop/zeroclaw.json</code> to track release tags via release-time CI; (b) document the staleness in the doc with a “use Option 1 (–prebuilt) for current release” steer.</p>
+<h2 id="2-doc-claims-windows-service--localsystem-path-that-isnt-implemented--medium-confirmed"><a class="header" href="#2-doc-claims-windows-service--localsystem-path-that-isnt-implemented--medium-confirmed">2. Doc claims Windows Service / LocalSystem path that isn’t implemented — MEDIUM (CONFIRMED)</a></h2>
+<p>Doc text:</p>
+<blockquote>
+<p>When run elevated, the installer registers a Windows Service under LocalSystem instead of a user-scoped scheduled task.</p>
+</blockquote>
+<p>Live verification on TYPHON, <strong>with elevated admin token (high integrity confirmed via <code>whoami /groups</code>)</strong>:</p>
+<pre><code>zeroclaw 0.7.3 (manually installed prebuilt)
+zeroclaw service install
+→ ✅ Installed Windows scheduled task: ZeroClaw Daemon
+   Wrapper: C:\Users\jasonperlow\.zeroclaw\logs\zeroclaw-daemon.cmd
+   Logs: C:\Users\jasonperlow\.zeroclaw\logs
+
+Get-ScheduledTask -TaskName *zeroclaw*  →  "ZeroClaw Daemon"  Ready
+Get-Service -Name *zeroclaw*            →  (empty, no service)
+</code></pre>
+<p><strong>No Windows Service was created.</strong> Even with an elevated admin token, the install path is scheduled-task. Confirms the original code review: 47 <code>cfg!(target_os = "windows")</code> branches all flow into the scheduled-task path; no <code>sc.exe</code> / <code>windows-service</code> crate / LocalSystem code exists.</p>
+<p><strong>Fix candidates:</strong> (a) implement the Windows Service path (<code>windows-service</code> crate + admin token check); (b) trim the doc to scheduled-task-only and reference Windows Service as a TODO.</p>
+<h2 id="3-log-path-doccode-drift--low-confirmed"><a class="header" href="#3-log-path-doccode-drift--low-confirmed">3. Log path doc/code drift — LOW (CONFIRMED)</a></h2>
+<p>Doc says: Logs go to <code>%LOCALAPPDATA%\ZeroClaw\logs\</code>.</p>
+<p>Live install output: <code>Logs: C:\Users\jasonperlow\.zeroclaw\logs</code> — i.e. <code>%USERPROFILE%\.zeroclaw\logs\</code>.</p>
+<p><strong>Fix candidate:</strong> doc edit to match code (less invasive than code change).</p>
+<h2 id="4-setupbat--not-current-multiple-bugs--high-new-replaces-ok"><a class="header" href="#4-setupbat--not-current-multiple-bugs--high-new-replaces-ok">4. setup.bat — NOT current; multiple bugs — HIGH (NEW, REPLACES “OK”)</a></h2>
+<p>Original draft marked this OK pending TYPHON verification. <strong>TYPHON verification revealed multiple blocking bugs.</strong> setup.bat <strong>does not complete</strong> on a clean Windows 11 box with a &gt;2 TB disk.</p>
+<h3 id="4a-hardcoded-version-drift-in-setupbat-itself"><a class="header" href="#4a-hardcoded-version-drift-in-setupbat-itself">4a. Hardcoded VERSION drift in setup.bat itself</a></h3>
+<p><code>setup.bat:10</code> has <code>set "VERSION=0.6.2"</code> — banner prints <code>ZeroClaw Windows Setup v0.6.2</code> even though Cargo.toml is at v0.7.3. Same staleness pattern as Scoop manifest. The version string is baked into the script and not updated by release CI.</p>
+<h3 id="4b-32-bit-overflow-in-disk-space-check"><a class="header" href="#4b-32-bit-overflow-in-disk-space-check">4b. 32-bit overflow in disk-space check</a></h3>
+<p><code>setup.bat:47-49</code>:</p>
+<pre><code class="language-cmd">for /f "tokens=3" %%a in ('dir /-C "%~dp0" 2^&gt;nul ^| findstr /C:"bytes free"') do (
+    set /a "FREE_DISK_GB=%%a / 1073741824"
+)
+</code></pre>
+<p><code>set /a</code> is 32-bit signed. Any drive larger than ~2 TB (free bytes &gt; 2^31) overflows and prints <strong>“Invalid number. Numbers are limited to 32-bits of precision.”</strong> TYPHON’s 1.8 TB drive has enough free bytes to trip this. The script continues past the error but the FREE_DISK_GB variable is not set.</p>
+<p><strong>Fix:</strong> use <code>set /a "FREE_DISK_GB=%%a / 1073741824 / 1"</code> won’t help — same overflow. Need to right-shift via PowerShell or compute in two steps (divide by 1024 three times). Cleanest: replace with <code>wmic logicaldisk get freespace</code> and divide in PowerShell.</p>
+<h3 id="4c-unescaped-parens-in-echo-inside-ifelse-block"><a class="header" href="#4c-unescaped-parens-in-echo-inside-ifelse-block">4c. Unescaped parens in echo inside <code>if/else</code> block</a></h3>
+<p><code>setup.bat:75</code>:</p>
+<pre><code class="language-cmd">where node &gt;nul 2&gt;&amp;1
+if %ERRORLEVEL% NEQ 0 (
+    echo   %YELLOW%Node.js not found (optional - web dashboard will use stub).%RESET%
+)
+</code></pre>
+<p>The <code>(optional - web dashboard will use stub).</code> literal has unescaped <code>(</code> and <code>)</code> inside an <code>if</code> block. cmd’s parser sees the <code>)</code> as an <code>if</code>-block terminator, then the <code>.%RESET%</code> (where <code>%RESET%</code> expands to ESC[0m) becomes free tokens that the parser can’t reconcile. <strong>Crash:</strong> <code>.[0m was unexpected at this time.</code> — script terminates partway through prerequisite checks.</p>
+<p><strong>Fix:</strong> escape parens with <code>^(</code> and <code>^)</code>, or use a separate-line approach without inline parens.</p>
+<h3 id="4d-end-to-end-setupbat-does-not-complete-on-typhon"><a class="header" href="#4d-end-to-end-setupbat-does-not-complete-on-typhon">4d. End-to-end: setup.bat does not complete on TYPHON</a></h3>
+<p>With both 4b and 4c present, <code>setup.bat --prebuilt</code> aborts during <code>[1/5] Checking prerequisites...</code> before ever reaching the binary download (step <code>[3/5]</code>). Manual install works (verified): downloading the v0.7.3 windows-msvc.zip and extracting to <code>%USERPROFILE%\.zeroclaw\bin\</code> produces a working <code>zeroclaw.exe</code> that reports <code>zeroclaw 0.7.3</code> and <code>service install</code> succeeds.</p>
+<p>So: the doc’s <em>Option 1 — setup.bat –prebuilt</em> path is <strong>broken on Windows 11 + drive &gt;2 TB</strong>. Doc’s underlying assumption (that the binary path works) is correct; only the wrapper script is broken.</p>
+<h2 id="5-service---help-is-linuxmacos-centric--low-new"><a class="header" href="#5-service---help-is-linuxmacos-centric--low-new">5. <code>service --help</code> is Linux/macOS-centric — LOW (NEW)</a></h2>
+<p><code>zeroclaw service --help</code> output:</p>
+<pre><code>Manage OS service lifecycle (launchd/systemd user service)
+...
+--service-init &lt;SERVICE_INIT&gt;  Init system to use: auto (detect), systemd, or openrc
+                               [possible values: auto, systemd, openrc]
+</code></pre>
+<p>Even though the code installs a Windows scheduled task on Windows (which clearly works — verified live), the help text mentions only launchd/systemd, and <code>--service-init</code> enum has no Windows option. Either:</p>
+<ul>
+<li>(a) The <code>--service-init</code> flag is dead code on Windows (in which case it should error or note that Windows uses scheduled task), or</li>
+<li>(b) The help text is missing a Windows-specific blurb that says “On Windows, installs a user-scoped scheduled task; –service-init is ignored.”</li>
+</ul>
+<p><strong>Fix candidate:</strong> doc/help-text edit. Keep code as-is (the scheduled-task path is solid).</p>
+<h2 id="6-smartscreen--long-paths-gotchas--verify-on-typhon-deferred"><a class="header" href="#6-smartscreen--long-paths-gotchas--verify-on-typhon-deferred">6. SmartScreen / long-paths gotchas — verify on TYPHON (DEFERRED)</a></h2>
+<p>Doc lists three gotchas; nothing in master code references them, which is correct (these are Windows OS behaviors not zeroclaw bugs). Worth confirming on TYPHON during install:</p>
+<ul>
+<li>(a) Long path support — does <code>setup.bat --full</code> build cleanly on a path-260-capped install? <strong>Not verified — setup.bat doesn’t complete (see 4d).</strong></li>
+<li>(b) SmartScreen first-launch — does the unsigned <code>zeroclaw.exe</code> actually trip SmartScreen as documented? <strong>Not tripped during PowerShell-based manual install (no UI shown). Likely only triggered on double-click in Explorer.</strong></li>
+<li>(c) Scheduled task stop-at-idle — installed task <code>ZeroClaw Daemon</code> has <code>State: Ready</code>. Did NOT inspect the full task definition for AC-power / idle-stop flags. Worth a <code>Get-ScheduledTask | Get-ScheduledTaskInfo</code> follow-up if doc-accuracy on these flags matters.</li>
+</ul>
+<h2 id="7-investorclaw-windows-test-surface--separate-scope-deferred"><a class="header" href="#7-investorclaw-windows-test-surface--separate-scope-deferred">7. InvestorClaw Windows test surface — separate scope (DEFERRED)</a></h2>
+<p>InvestorClaw Windows tests are a different test path from zeroclaw setup. Out of scope for this doc review.</p>
+<hr>
+<h2 id="recommended-pr-shape-updated-post-typhon-validation"><a class="header" href="#recommended-pr-shape-updated-post-typhon-validation">Recommended PR shape (updated post-TYPHON validation)</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Fix</th><th>Surface</th><th>Effort</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>Scoop manifest version bump (and release-time CI hook)</td><td><code>dist/scoop/zeroclaw.json</code> + new release workflow</td><td>small — manifest bump trivial, CI hook ~30 LOC</td></tr>
+<tr><td>2</td><td>setup.bat: hardcoded VERSION line 10</td><td><code>setup.bat</code></td><td>trivial — derive from Cargo.toml or release tag</td></tr>
+<tr><td>3</td><td>setup.bat: disk-space 32-bit overflow (line 47-49)</td><td><code>setup.bat</code></td><td>small — replace cmd arithmetic with PowerShell one-liner</td></tr>
+<tr><td>4</td><td>setup.bat: unescaped <code>(</code> <code>)</code> inside echo inside <code>if</code> (line 75)</td><td><code>setup.bat</code></td><td>trivial — <code>^(</code> and <code>^)</code></td></tr>
+<tr><td>5</td><td>Doc: Windows Service is TODO, scheduled task is the supported path</td><td><code>singlerider/zeroclaw</code> docs site</td><td>trivial</td></tr>
+<tr><td>6</td><td>Doc: log path → <code>%USERPROFILE%\.zeroclaw\logs\</code></td><td>docs site</td><td>trivial</td></tr>
+<tr><td>7</td><td>service –help: Windows scheduled-task line + clarify <code>--service-init</code> is no-op on Windows</td><td><code>crates/zeroclaw-runtime/src/service/cli.rs</code> (or wherever <code>clap</code> derives are)</td><td>trivial</td></tr>
+<tr><td>8</td><td>Implement Windows Service / LocalSystem mode (full impl, not just doc-trim)</td><td><code>crates/zeroclaw-runtime/src/service/mod.rs</code></td><td>medium — 200-400 LOC, needs <code>windows-service</code> crate, admin-token detection, scheduled-task fallback when not elevated, TYPHON test</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Recommended order to land:</strong> 4 → 3 → 2 → 7 → 1 → 5+6 → 8 (4+3 are blockers for setup.bat to work at all; 2+7 polish; 1 fixes Scoop; 5+6 are pure doc; 8 is feature work).</p>
+<hr>
+<p><em>Review v1 written 2026-04-25 evening (pre-validation).</em>
+<em>Review v2 updated 2026-04-25 morning Windows session (post-TYPHON validation): 4 marked HIGH and broken into 4a-4d, finding 5 added, finding 4 (originally OK) replaced. PR shape expanded from 4 to 8 items with new ordering.</em></p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="draft-single-consolidated-zeroclaw-pr"><a class="header" href="#draft-single-consolidated-zeroclaw-pr">Draft: Single consolidated zeroclaw PR</a></h1>
+<p>This file is the body for ONE upstream PR. It supersedes the prior split into “comment on PR #6099 + separate issue”.</p>
+<p><strong>File destination:</strong> <code>~/zeroclaw-drafts/zeroclaw-divergences-pr-draft.md</code>
+<strong>Target repo + branch:</strong> <code>zeroclaw-labs/zeroclaw:master</code>
+<strong>Source branch:</strong> <code>perlowja:fix/api-divergences-c2-c6</code> (to be created in fork)
+<strong>Tested against:</strong> zeroclaw <code>v0.7.3-46-g165cb335</code> (image <code>ghcr.io/perlowja/nclawzero-demo:master-165cb33</code>, commit <code>165cb33</code> on <code>master</code>, 46 commits past <code>v0.7.3</code>)
+<strong>Live walk evidence:</strong> <a href="https://github.com/perlowja/meta-nclawzero/blob/main/docs/ZEROCLAW-API-LIVE-WALK.md">docs/ZEROCLAW-API-LIVE-WALK.md</a> (39 of 57 catalogued endpoints walked)</p>
+<hr>
+<h1 id="fixapi-five-http-api-divergences-from-documented-behavior"><a class="header" href="#fixapi-five-http-api-divergences-from-documented-behavior">fix(api): five HTTP API divergences from documented behavior</a></h1>
+<p><strong>Tested against:</strong> <code>v0.7.3-46-g165cb335</code> (commit <code>165cb335</code> on <code>master</code>).</p>
+<p>A live walk of the HTTP API surface against <code>ghcr.io/perlowja/nclawzero-demo:master-165cb33</code> (built from <code>master</code> at <code>165cb33</code>, the demo container we ship for exhibitions) surfaced five small divergences from documented or expected behavior. Each is independently small and surgical; bundling them into one PR keeps the maintainer queue tidy. The full live walk is linked above; this PR addresses §C.2 through §C.6 (§C.1 is covered by sibling PR #6099).</p>
+<p>Per-finding rationale + repro + proposed change below. Each commit in this PR is scoped to a single finding so a maintainer can drop or rework any individual fix without losing the rest.</p>
+<h2 id="c2--apicron-allowlist-matches-whole-command-instead-of-head-executable"><a class="header" href="#c2--apicron-allowlist-matches-whole-command-instead-of-head-executable">§C.2 — <code>/api/cron</code> allowlist matches whole command instead of head executable</a></h2>
+<p><strong>Repro</strong> (against the demo image; pairing off):</p>
+<pre><code>curl -X POST http://127.0.0.1:42617/api/cron \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"t","schedule":"@daily","command":"python3 -c print(1)"}'
+</code></pre>
+<p><strong>Observed:</strong> HTTP 200 with body <code>{"error":"Failed to add cron job: blocked by security policy: Command not allowed by security policy: python3 -c print(1)"}</code>. The user’s <code>autonomy.allowed_commands</code> includes <code>python3</code>, but the matcher treats the whole command string <code>python3 -c print(1)</code> as the lookup key and finds no exact match.</p>
+<p><strong>Proposed fix:</strong> Split the candidate command on whitespace and match the head token (<code>python3</code>) against <code>allowed_commands</code>, not the entire string. Existing security posture is preserved (deny-by-default, head-token must be explicitly allow-listed).</p>
+<h2 id="c3--inconsistent-error-code-conventions-across-write-endpoints"><a class="header" href="#c3--inconsistent-error-code-conventions-across-write-endpoints">§C.3 — Inconsistent error-code conventions across write endpoints</a></h2>
+<p>Four write endpoints currently use three different conventions for validation/policy/runtime failures:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Endpoint</th><th>Status</th><th>Body</th><th>Convention</th></tr>
+</thead>
+<tbody>
+<tr><td><code>POST /api/cron</code> (security policy reject)</td><td>200</td><td><code>{"error": "..."}</code></td><td>Envelope JSON, success status</td></tr>
+<tr><td><code>POST /api/memory</code> (storage write fail)</td><td>500</td><td><code>{"error": "..."}</code></td><td>JSON, server-error status</td></tr>
+<tr><td><code>POST /api/canvas/&lt;id&gt;</code> (content_type reject)</td><td>400</td><td><code>{"error": "..."}</code></td><td>JSON, client-error status</td></tr>
+<tr><td><code>POST /api/pair</code> (bad code)</td><td>400</td><td><code>Invalid or expired pairing code</code></td><td>Plaintext, client-error status</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Proposed fix:</strong> Normalize to the JSON-error + 4xx-status convention. Concretely:</p>
+<ul>
+<li><code>POST /api/cron</code>: replace the success-status JSON wrapper with HTTP 422 <code>{"error":"...","code":"security_policy"}</code> for security rejections; HTTP 400 for shape errors.</li>
+<li><code>POST /api/pair</code>: change the plaintext body to <code>{"error":"Invalid or expired pairing code"}</code> and keep 400.</li>
+<li><code>POST /api/memory</code>: keep 500 for genuine storage failures (the read-only-DB case observed in the demo image is a real server-state failure), but distinguish from request-validation 4xx.</li>
+</ul>
+<h2 id="c4--apisessionsidmessages-returns-200empty-for-unknown-id"><a class="header" href="#c4--apisessionsidmessages-returns-200empty-for-unknown-id">§C.4 — <code>/api/sessions/&lt;id&gt;/messages</code> returns 200+empty for unknown id</a></h2>
+<p><strong>Repro:</strong></p>
+<pre><code>curl http://127.0.0.1:42617/api/sessions/does-not-exist/messages
+</code></pre>
+<p><strong>Observed:</strong> HTTP 200 with body <code>{"messages":[],"session_id":"does-not-exist","session_persistence":false}</code>. Compare with <code>/api/sessions/&lt;id&gt;/state</code> for the same unknown id, which returns HTTP 404 <code>{"error":"Session persistence is disabled"}</code>. Asymmetric within the same resource family.</p>
+<p><strong>Proposed fix:</strong> Make <code>/api/sessions/&lt;id&gt;/messages</code> 404 on unknown ids when persistence is enabled (current behavior is “200 + empty” regardless of id existence). When persistence is disabled, both endpoints should return the same shape — either both 404 with a “persistence disabled” message, or both 200 with an empty result and a <code>session_persistence:false</code> flag. Pick one and apply uniformly.</p>
+<h2 id="c5--apiplugins-is-shadowed-by-spa-fallback-when-feature-is-off"><a class="header" href="#c5--apiplugins-is-shadowed-by-spa-fallback-when-feature-is-off">§C.5 — <code>/api/plugins</code> is shadowed by SPA fallback when feature is off</a></h2>
+<p><strong>Repro:</strong> Default demo build (no <code>plugins-wasm</code> feature, no <code>web_dist_dir</code> configured):</p>
+<pre><code>curl -i http://127.0.0.1:42617/api/plugins
+</code></pre>
+<p><strong>Observed:</strong> HTTP 503 with body <code>Web dashboard not available. Set gateway.web_dist_dir in your config and build the frontend with: cd web &amp;&amp; npm ci &amp;&amp; npm run build</code>. The static-files SPA fallback intercepts the unrouted <code>/api/plugins</code> path and returns the dashboard-not-built error, masking the fact that the API endpoint is feature-gated off rather than misconfigured.</p>
+<p><strong>Proposed fix:</strong> Register a feature-aware stub for <code>/api/plugins</code> that returns HTTP 404 <code>{"error":"plugins endpoint not enabled","feature":"plugins-wasm"}</code> when the feature is compiled out, so client feature-detection works without confusion. The same pattern applies to any other <code>/api/*</code> route that the SPA fallback currently shadows when its feature is off.</p>
+<h2 id="c6--metrics-returns-200plaintext-explanation-when-prometheus-backend-is-disabled"><a class="header" href="#c6--metrics-returns-200plaintext-explanation-when-prometheus-backend-is-disabled">§C.6 — <code>/metrics</code> returns 200+plaintext explanation when Prometheus backend is disabled</a></h2>
+<p><strong>Repro:</strong></p>
+<pre><code>curl -i http://127.0.0.1:42617/metrics
+</code></pre>
+<p><strong>Observed:</strong> HTTP 200 with body <code># Prometheus backend not enabled. Set [observability] backend = "prometheus" in config.</code>. A scraping Prometheus server treats this as a valid empty exposition (one comment line, no samples) — observability is silently broken.</p>
+<p><strong>Proposed fix:</strong> Return HTTP 404 (or 503 with the same body) when <code>[observability] backend</code> is not <code>prometheus</code>. Prometheus scrapers will mark the target as down and surface the misconfiguration to operators instead of silently scraping empty.</p>
+<hr>
+<h2 id="test-approach"><a class="header" href="#test-approach">Test approach</a></h2>
+<p>Each finding gets a unit test in the relevant crate (most live in <code>zeroclaw-gateway</code> and <code>zeroclaw-runtime</code>). Tests assert the expected status code + body shape for the failure path. The live walk doc is linked for any maintainer who wants the broader context.</p>
+<h2 id="cross-references"><a class="header" href="#cross-references">Cross-references</a></h2>
+<ul>
+<li><strong>Sibling PR:</strong> #6099 (<code>fix(config): preserve user-supplied providers.fallback through load/save</code>) covers §C.1 of the same live walk. This PR explicitly does not duplicate that work; the two PRs can land independently.</li>
+<li><strong>Live walk source:</strong> <code>perlowja/meta-nclawzero</code> repo at <code>docs/ZEROCLAW-API-LIVE-WALK.md</code> — full record of the 39 endpoints probed, with sanitized response bodies and divergences flagged.</li>
+</ul>
+<h2 id="constraints-honored"><a class="header" href="#constraints-honored">Constraints honored</a></h2>
+<ul>
+<li>Each commit author: <code>Jason Perlow &lt;jperlow@gmail.com&gt;</code>.</li>
+<li>No corporate-employer references in code or commit messages.</li>
+<li>All examples use neutral provider names (<code>primary</code>, <code>together</code>, <code>gemini-flash-latest</code>) — no Anthropic/Claude default suggestions.</li>
+<li>Each fix is independently revertable (one commit per finding).</li>
+</ul>
+<h2 id="checklist"><a class="header" href="#checklist">Checklist</a></h2>
+<ul>
+<li><input disabled="" type="checkbox" checked=""> Branch <code>fix/api-divergences-c2-c6</code> created (lives on ARGONAS bare <code>zeroclaw.git</code> for safekeeping; not yet on perlowja fork)</li>
+<li><input disabled="" type="checkbox"> <strong>§C.2 cron allowlist matcher commit — RE-EVALUATE.</strong> The original draft claimed <code>is_command_allowed</code> matches the whole command string. Reading current source (<code>crates/zeroclaw-config/src/policy.rs:1140-1163</code>), it already extracts the head token via <code>command_basename(executable)</code>. The actual rejection of <code>python3 -c print(1)</code> comes from <code>is_args_safe</code> at lines 1207-1219 which <strong>intentionally blocks <code>-c</code> and <code>-m</code></strong> (arbitrary code exec / module loader vectors). The real divergence is the <strong>error message</strong>: it says “Command not allowed by security policy” for what is actually an argument-pattern rejection. Recommended fix: distinguish in the error string (“Argument pattern blocked: <code>python3 -c</code> runs arbitrary code; use a script file instead”). NO CODE CHANGE TO MATCHER NEEDED.</li>
+<li><input disabled="" type="checkbox"> §C.3 error response normalization commit. Current code at <code>crates/zeroclaw-gateway/src/api.rs:347-354</code> returns 500 INTERNAL_SERVER_ERROR for ALL cron add failures (including security policy rejections, which should be 422). Distinguish in the match arm: error string starting with “Command not allowed” or containing “security policy” → 422 + <code>code: "security_policy"</code>; storage failures → 500. Same-PR change to <code>/api/pair</code> plaintext → JSON.</li>
+<li><input disabled="" type="checkbox"> §C.4 sessions/messages 404 commit. Current handler at <code>crates/zeroclaw-gateway/src/api.rs:1333</code> (<code>/api/sessions/{id}/messages</code>) returns 200+empty for unknown ids when persistence is enabled. Compare with <code>/api/sessions/{id}/state</code> (line 1485) which returns 404. Make symmetric.</li>
+<li><input disabled="" type="checkbox"> §C.5 plugins feature-aware stub commit. The <code>plugins-wasm</code> feature gate is in <code>crates/zeroclaw-gateway/src/api_plugins.rs</code> (route registration is conditional). When the feature is off, the SPA fallback shadows the path. Add a feature-OFF stub returning 404+JSON <code>{"error":"plugins endpoint not enabled","feature":"plugins-wasm"}</code> registered unconditionally in <code>lib.rs</code>.</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>§C.6 metrics 503-when-disabled commit</strong> — DONE on local branch. Commit on <code>fix/api-divergences-c2-c6</code>: replaces 200+plaintext disabled-hint with 503 SERVICE_UNAVAILABLE so Prometheus scrapers mark the target down. Test <code>metrics_endpoint_returns_503_when_prometheus_is_disabled</code> updated. Branch pushed to ARGONAS bare; not yet on perlowja fork.</li>
+<li><input disabled="" type="checkbox"> Unit tests for each finding green — needs <code>cargo test</code> on a Rust workspace host (ULTRA arm64 per fleet build routing).</li>
+<li><input disabled="" type="checkbox"> <code>cargo fmt --all -- --check</code> clean (rustup match CI toolchain version)</li>
+<li><input disabled="" type="checkbox"> <code>cargo clippy --workspace -- -D warnings</code> clean (or scoped + documented)</li>
+<li><input disabled="" type="checkbox"> Squash-or-keep decision per maintainer convention (default: keep one commit per finding for revertability)</li>
+<li><input disabled="" type="checkbox"> PR body posted, sibling PR #6099 cross-referenced</li>
+</ul>
+<h2 id="implementation-hand-off-2026-04-25-evening"><a class="header" href="#implementation-hand-off-2026-04-25-evening">Implementation hand-off (2026-04-25 evening)</a></h2>
+<p><strong>State on <code>fix/api-divergences-c2-c6</code> branch:</strong></p>
+<ul>
+<li>1 commit: §C.6 metrics 503 fix (gateway/lib.rs, with test).</li>
+<li>Branch lives on ARGONAS at <code>/mnt/datapool/git/zeroclaw.git</code> and on local <code>/tmp/zeroclaw</code>.</li>
+<li>NOT yet pushed to <code>github.com/perlowja/zeroclaw</code> (held for review).</li>
+</ul>
+<p><strong>Remaining work for ULTRA-side execution</strong> (Rust workspace builds best on arm64 macOS per fleet routing):</p>
+<ol>
+<li>Clone the branch from ARGONAS or fast-forward from local</li>
+<li>Implement C.2 (error-message clarification only — no matcher change), C.3 (error code distinction), C.4 (sessions/messages 404), C.5 (plugins stub) per pointers in checklist above</li>
+<li><code>cargo test --all-features</code> for each affected crate (<code>zeroclaw-config</code>, <code>zeroclaw-gateway</code>)</li>
+<li><code>cargo fmt --all -- --check</code> + <code>cargo clippy --workspace -- -D warnings</code></li>
+<li>Push to <code>github.com/perlowja/zeroclaw:fix/api-divergences-c2-c6</code> and open PR against <code>zeroclaw-labs/zeroclaw:master</code></li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        
+        
+        
+
+        
+        
+        
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
