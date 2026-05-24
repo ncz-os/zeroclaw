@@ -7,6 +7,8 @@ pub mod debounce;
 pub mod session_backend;
 #[cfg(feature = "backend-db2")]
 pub mod session_db2;
+#[cfg(feature = "backend-mysql")]
+pub mod session_mysql;
 #[cfg(feature = "backend-oracle")]
 pub mod session_oracle;
 #[cfg(feature = "backend-postgres")]
@@ -51,7 +53,13 @@ pub struct RemoteSessionConfig<'a> {
     /// Oracle Easy Connect DSN for `backend = "oracle"`, e.g.
     /// `"//host:1521/ORCLPDB1"`.
     pub oracle_dsn: Option<&'a str>,
-    /// Maximum pool connections (used by both postgres and oracle backends).
+    /// MySQL DSN for `backend = "mysql"`, e.g.
+    /// `"mysql://zeroclaw:secret@primary:3306/zeroclaw"`.
+    /// MySQL 9.0+ required (earlier versions lack native VECTOR support used
+    /// by co-located fleet services and have fractional-second timestamp edge cases).
+    pub mysql_url: Option<&'a str>,
+    /// Maximum pool connections (used by postgres and oracle backends).
+    /// MySQL uses its own built-in pool; this field sets its max size too.
     /// Defaults to `5`.
     pub pool_size: Option<u32>,
 }
@@ -130,6 +138,17 @@ pub fn make_session_backend_with_config(
             Ok(Arc::new(store))
         }
 
+        #[cfg(feature = "backend-mysql")]
+        "mysql" => {
+            let url = cfg.mysql_url.ok_or_else(|| {
+                std::io::Error::other("session_backend=mysql requires mysql_url in config")
+            })?;
+            let pool_size = cfg.pool_size.unwrap_or(5) as usize;
+            let store = session_mysql::MysqlSessionBackend::new(url, pool_size)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            Ok(Arc::new(store))
+        }
+
         other => {
             ::zeroclaw_log::record!(
                 WARN,
@@ -137,7 +156,7 @@ pub fn make_session_backend_with_config(
                     .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                     .with_attrs(::serde_json::json!({"other": other})),
                 "Unknown session_backend ''; falling back to sqlite. \
-                 Valid values: 'sqlite' (default), 'jsonl', 'postgres', 'oracle', 'db2'."
+                 Valid values: 'sqlite' (default), 'jsonl', 'postgres', 'oracle', 'db2', 'mysql'."
             );
             Ok(Arc::new(open_sqlite_with_jsonl_import(workspace_dir)?))
         }
