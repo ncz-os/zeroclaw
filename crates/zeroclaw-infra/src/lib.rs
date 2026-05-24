@@ -5,6 +5,10 @@
 pub mod acp_session_store;
 pub mod debounce;
 pub mod session_backend;
+#[cfg(feature = "backend-oracle")]
+pub mod session_oracle;
+#[cfg(feature = "backend-postgres")]
+pub mod session_postgres;
 pub mod session_sqlite;
 pub mod session_store;
 pub mod stall_watchdog;
@@ -26,9 +30,48 @@ use crate::session_backend::SessionBackend;
 ///
 /// Errors propagate from the underlying backend constructor (typically
 /// filesystem permissions on the sessions directory).
+/// Configuration for optional remote session backends.
+///
+/// Only fields relevant to the chosen `backend` need to be populated.
+#[derive(Default)]
+pub struct RemoteSessionConfig<'a> {
+    /// libpq DSN for `backend = "postgres"`, e.g.
+    /// `"postgresql://zeroclaw:secret@primary/zeroclaw"`.
+    pub postgres_url: Option<&'a str>,
+    /// Oracle user for `backend = "oracle"`.
+    pub oracle_user: Option<&'a str>,
+    /// Oracle password for `backend = "oracle"`.
+    pub oracle_password: Option<&'a str>,
+    /// Oracle Easy Connect DSN for `backend = "oracle"`, e.g.
+    /// `"//host:1521/ORCLPDB1"`.
+    pub oracle_dsn: Option<&'a str>,
+    /// Maximum pool connections (used by both postgres and oracle backends).
+    /// Defaults to `5`.
+    pub pool_size: Option<u32>,
+}
+
+/// Construct the configured session-persistence backend.
+///
+/// `backend` selects the implementation:
+/// - `"sqlite"` (default) — file-backed, single-host.
+/// - `"jsonl"` — legacy one-file-per-session format.
+/// - `"postgres"` — shared PostgreSQL store; requires `backend-postgres` feature.
+/// - `"oracle"` — Oracle 23ai store; requires `backend-oracle` feature.
+///
+/// Unknown values fall back to SQLite with a warning so a typo in config
+/// never silently disables persistence.
 pub fn make_session_backend(
     workspace_dir: &Path,
     backend: &str,
+) -> std::io::Result<Arc<dyn SessionBackend>> {
+    make_session_backend_with_config(workspace_dir, backend, &RemoteSessionConfig::default())
+}
+
+/// Like [`make_session_backend`] but accepts remote-backend credentials.
+pub fn make_session_backend_with_config(
+    workspace_dir: &Path,
+    backend: &str,
+    cfg: &RemoteSessionConfig<'_>,
 ) -> std::io::Result<Arc<dyn SessionBackend>> {
     match backend {
         "jsonl" => {
@@ -36,6 +79,38 @@ pub fn make_session_backend(
             Ok(Arc::new(store))
         }
         "sqlite" => Ok(Arc::new(open_sqlite_with_jsonl_import(workspace_dir)?)),
+
+        #[cfg(feature = "backend-postgres")]
+        "postgres" => {
+            let url = cfg.postgres_url.ok_or_else(|| {
+                std::io::Error::other("session_backend=postgres requires postgres_url in config")
+            })?;
+            let pool_size = cfg.pool_size.unwrap_or(5);
+            let store = session_postgres::PostgresSessionBackend::new(url, pool_size)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            Ok(Arc::new(store))
+        }
+
+        #[cfg(feature = "backend-oracle")]
+        "oracle" => {
+            let user = cfg.oracle_user.ok_or_else(|| {
+                std::io::Error::other("session_backend=oracle requires oracle_user in config")
+            })?;
+            let password = cfg.oracle_password.ok_or_else(|| {
+                std::io::Error::other(
+                    "session_backend=oracle requires oracle_password in config",
+                )
+            })?;
+            let dsn = cfg.oracle_dsn.ok_or_else(|| {
+                std::io::Error::other("session_backend=oracle requires oracle_dsn in config")
+            })?;
+            let pool_size = cfg.pool_size.unwrap_or(5);
+            let store =
+                session_oracle::OracleSessionBackend::new(user, password, dsn, pool_size)
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+            Ok(Arc::new(store))
+        }
+
         other => {
             ::zeroclaw_log::record!(
                 WARN,
@@ -43,7 +118,7 @@ pub fn make_session_backend(
                     .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                     .with_attrs(::serde_json::json!({"other": other})),
                 "Unknown session_backend ''; falling back to sqlite. \
-                 Valid values: 'sqlite' (default), 'jsonl'."
+                 Valid values: 'sqlite' (default), 'jsonl', 'postgres', 'oracle'."
             );
             Ok(Arc::new(open_sqlite_with_jsonl_import(workspace_dir)?))
         }

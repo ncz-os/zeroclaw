@@ -6,6 +6,13 @@ license.workspace = true
 description = "Channel infrastructure: session backends, debouncing, stall watchdog."
 publish = false
 
+[features]
+## PostgreSQL session backend (adds `postgres`, `r2d2`, `r2d2-postgres`).
+backend-postgres = ["dep:postgres", "dep:r2d2", "dep:r2d2-postgres"]
+## Oracle 23ai session backend (adds `oracle`, `r2d2`).
+## Requires Oracle Instant Client at runtime; set LD_LIBRARY_PATH accordingly.
+backend-oracle = ["dep:oracle", "dep:r2d2"]
+
 [dependencies]
 zeroclaw-log.workspace = true
 zeroclaw-api.workspace = true
@@ -17,6 +24,14 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 tokio = { version = "1.50", default-features = false, features = ["sync", "time"] }
+
+# Optional: PostgreSQL backend
+postgres     = { version = "0.19", optional = true }
+r2d2         = { version = "0.8",  optional = true }
+r2d2-postgres = { version = "0.18", optional = true }
+
+# Optional: Oracle 23ai backend
+oracle = { version = "0.5", optional = true, features = ["chrono"] }
 
 [dev-dependencies]
 tempfile = "3.26"
