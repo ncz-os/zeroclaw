@@ -50,7 +50,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use odbc_api::{
     buffers::TextRowSet,
-    Connection, Environment,
+    parameter::{VarCharBox, VarCharSlice},
+    Connection, Environment, ParameterCollectionRef,
 };
 use r2d2::ManageConnection;
 use r2d2::Pool;
@@ -218,26 +219,29 @@ fn is_duplicate_object(e: &odbc_api::Error) -> bool {
 fn select_rows(
     conn: &Connection<'static>,
     sql: &str,
-    params: impl odbc_api::IntoParameter,
+    params: impl ParameterCollectionRef,
 ) -> Vec<Vec<Option<String>>> {
-    let cursor = match conn.execute(sql, params) {
+    let mut cursor = match conn.execute(sql, params) {
         Ok(Some(c)) => c,
         _ => return Vec::new(),
     };
-    let num_cols = cursor.num_result_cols().unwrap_or(0) as usize;
+    let num_cols = match cursor.num_result_cols() {
+        Ok(n) => n as usize,
+        Err(_) => return Vec::new(),
+    };
     if num_cols == 0 {
         return Vec::new();
     }
-    let mut row_set = match TextRowSet::for_cursor(256, &cursor, Some(8192)) {
+    let row_set = match TextRowSet::for_cursor(256, &mut cursor, Some(8192)) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
-    let mut cursor = match cursor.bind_buffer(&mut row_set) {
+    let mut block_cursor = match cursor.bind_buffer(row_set) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    while let Ok(Some(batch)) = cursor.fetch() {
+    while let Ok(Some(batch)) = block_cursor.fetch() {
         for row_idx in 0..batch.num_rows() {
             let row: Vec<Option<String>> = (0..num_cols)
                 .map(|col| {
@@ -307,7 +311,7 @@ impl SessionBackend for Db2SessionBackend {
             &g.0,
             "SELECT ROLE, CONTENT FROM ZC_SESSIONS
              WHERE SESSION_KEY = ? ORDER BY ID ASC",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         )
         .into_iter()
         .map(|row| ChatMessage {
@@ -322,10 +326,14 @@ impl SessionBackend for Db2SessionBackend {
         let conn = &g.0;
         let now = fmt_ts(&Utc::now());
 
+        let sk = VarCharSlice::new(session_key.as_bytes());
+        let role = VarCharSlice::new(message.role.as_bytes());
+        let content = VarCharSlice::new(message.content.as_bytes());
+        let ts = VarCharSlice::new(now.as_bytes());
         conn.execute(
             "INSERT INTO ZC_SESSIONS (SESSION_KEY, ROLE, CONTENT, CREATED_AT)
              VALUES (?, ?, ?, TIMESTAMP(?))",
-            &(session_key, message.role.as_str(), message.content.as_str(), now.as_str()),
+            (&sk, &role, &content, &ts),
         )
         .map_err(std::io::Error::other)?;
 
@@ -339,7 +347,7 @@ impl SessionBackend for Db2SessionBackend {
              WHEN NOT MATCHED THEN INSERT
                  (SESSION_KEY, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT)
              VALUES (src.SK, SYSTIMESTAMP, SYSTIMESTAMP, 1)",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         )
         .map_err(std::io::Error::other)?;
 
@@ -354,7 +362,7 @@ impl SessionBackend for Db2SessionBackend {
         let rows = select_rows(
             conn,
             "SELECT MAX(ID) FROM ZC_SESSIONS WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         );
         let max_id = rows
             .into_iter()
@@ -375,7 +383,7 @@ impl SessionBackend for Db2SessionBackend {
              SET MESSAGE_COUNT = GREATEST(0, MESSAGE_COUNT - 1),
                  LAST_ACTIVITY  = SYSTIMESTAMP
              WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         )
         .map_err(std::io::Error::other)?;
 
@@ -422,7 +430,7 @@ impl SessionBackend for Db2SessionBackend {
             conn,
             "SELECT SESSION_KEY FROM ZC_SESSION_META
              WHERE LAST_ACTIVITY < TIMESTAMP(?)",
-            &cutoff.as_str(),
+            &VarCharSlice::new(cutoff.as_bytes()),
         )
         .into_iter()
         .map(|row| col_str(&row, 0))
@@ -430,11 +438,14 @@ impl SessionBackend for Db2SessionBackend {
 
         let n = stale.len();
         for key in &stale {
-            conn.execute("DELETE FROM ZC_SESSIONS WHERE SESSION_KEY = ?", &key.as_str())
-                .map_err(std::io::Error::other)?;
+            conn.execute(
+                "DELETE FROM ZC_SESSIONS WHERE SESSION_KEY = ?",
+                &VarCharSlice::new(key.as_bytes()),
+            )
+            .map_err(std::io::Error::other)?;
             conn.execute(
                 "DELETE FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
-                &key.as_str(),
+                &VarCharSlice::new(key.as_bytes()),
             )
             .map_err(std::io::Error::other)?;
         }
@@ -451,6 +462,7 @@ impl SessionBackend for Db2SessionBackend {
         let limit = query.limit.unwrap_or(50) as i64;
         // Db2 does not have ILIKE; use LOWER() on both sides.
         let pattern = format!("%{}%", kw.to_lowercase());
+        let p = VarCharSlice::new(pattern.as_bytes());
         select_rows(
             conn,
             "SELECT DISTINCT s.SESSION_KEY, m.NAME, m.CREATED_AT,
@@ -461,7 +473,7 @@ impl SessionBackend for Db2SessionBackend {
              WHERE LOWER(CAST(s.CONTENT AS VARCHAR(8192))) LIKE ?
              ORDER BY m.LAST_ACTIVITY DESC
              FETCH FIRST ? ROWS ONLY",
-            &(pattern.as_str(), limit),
+            (&p, &limit),
         )
         .into_iter()
         .map(|row| row_to_meta(&row))
@@ -476,7 +488,7 @@ impl SessionBackend for Db2SessionBackend {
         let exists = select_rows(
             conn,
             "SELECT 1 FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         )
         .first()
         .is_some();
@@ -485,11 +497,14 @@ impl SessionBackend for Db2SessionBackend {
             return Ok(false);
         }
 
-        conn.execute("DELETE FROM ZC_SESSIONS WHERE SESSION_KEY = ?", &session_key)
-            .map_err(std::io::Error::other)?;
+        conn.execute(
+            "DELETE FROM ZC_SESSIONS WHERE SESSION_KEY = ?",
+            &VarCharSlice::new(session_key.as_bytes()),
+        )
+        .map_err(std::io::Error::other)?;
         conn.execute(
             "DELETE FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         )
         .map_err(std::io::Error::other)?;
 
@@ -498,9 +513,11 @@ impl SessionBackend for Db2SessionBackend {
 
     fn set_session_name(&self, session_key: &str, name: &str) -> std::io::Result<()> {
         let g = self.pool.get().map_err(std::io::Error::other)?;
+        let n = VarCharSlice::new(name.as_bytes());
+        let sk = VarCharSlice::new(session_key.as_bytes());
         g.0.execute(
             "UPDATE ZC_SESSION_META SET NAME = ? WHERE SESSION_KEY = ?",
-            &(name, session_key),
+            (&n, &sk),
         )
         .map_err(std::io::Error::other)?;
         Ok(())
@@ -511,7 +528,7 @@ impl SessionBackend for Db2SessionBackend {
         let rows = select_rows(
             &g.0,
             "SELECT NAME FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         );
         Ok(rows.into_iter().next().and_then(|r| col_opt(&r, 0)))
     }
@@ -523,18 +540,17 @@ impl SessionBackend for Db2SessionBackend {
         turn_id: Option<&str>,
     ) -> std::io::Result<()> {
         let g = self.pool.get().map_err(std::io::Error::other)?;
-        // Bind NULL as "" for a nullable VARCHAR column via the CData approach.
-        // odbc-api represents SQL NULL through `odbc_api::Nullable<T>`.
-        use odbc_api::Nullable;
-        let turn_id_val: Nullable<String> = match turn_id {
-            Some(s) => Nullable::new(s.to_owned()),
-            None => Nullable::null(),
+        let turn_id_val = match turn_id {
+            Some(s) => VarCharBox::from_string(s.to_string()),
+            None => VarCharBox::null(),
         };
+        let st = VarCharSlice::new(state.as_bytes());
+        let sk = VarCharSlice::new(session_key.as_bytes());
         g.0.execute(
             "UPDATE ZC_SESSION_META
              SET STATE = ?, TURN_ID = ?, TURN_STARTED_AT = SYSTIMESTAMP
              WHERE SESSION_KEY = ?",
-            &(state, &turn_id_val, session_key),
+            (&st, &turn_id_val, &sk),
         )
         .map_err(std::io::Error::other)?;
         Ok(())
@@ -546,7 +562,7 @@ impl SessionBackend for Db2SessionBackend {
             &g.0,
             "SELECT STATE, TURN_ID, TURN_STARTED_AT
              FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         );
         let row = match rows.into_iter().next() {
             Some(r) => r,
@@ -594,7 +610,7 @@ impl SessionBackend for Db2SessionBackend {
              WHERE STATE = 'running'
                AND TURN_STARTED_AT < TIMESTAMP(?)
              ORDER BY TURN_STARTED_AT ASC",
-            &cutoff.as_str(),
+            &VarCharSlice::new(cutoff.as_bytes()),
         )
         .into_iter()
         .map(|row| row_to_meta(&row))
@@ -608,7 +624,7 @@ impl SessionBackend for Db2SessionBackend {
             "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
                     AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
-            &session_key,
+            &VarCharSlice::new(session_key.as_bytes()),
         );
         rows.into_iter().next().map(|row| row_to_meta(&row))
     }
