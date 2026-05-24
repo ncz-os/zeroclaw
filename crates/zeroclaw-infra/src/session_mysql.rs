@@ -51,12 +51,17 @@ impl MysqlSessionBackend {
     /// `pool_size` controls the maximum number of pooled connections.
     pub fn new(database_url: &str, pool_size: usize) -> Result<Self> {
         let opts = mysql::Opts::from_url(database_url).context("invalid MySQL URL")?;
+        // Pool::new_manual was removed in mysql 25; use Pool::new + PoolOpts for
+        // size control. PoolConstraints::new(active_min, active_max).
+        let constraints = mysql::PoolConstraints::new(1, pool_size)
+            .context("invalid pool constraints")?;
+        let pool_opts = mysql::PoolOpts::new().with_constraints(constraints);
         let builder = mysql::OptsBuilder::from_opts(opts)
             // Enforce UTC for all connections so DATETIME(6) values round-trip
             // correctly without server-side timezone configuration.
-            .init(vec!["SET time_zone = '+00:00'"]);
-        let pool = Pool::new_manual(1, pool_size, builder)
-            .context("failed to build MySQL connection pool")?;
+            .init(vec!["SET time_zone = '+00:00'"])
+            .pool_opts(pool_opts);
+        let pool = Pool::new(builder).context("failed to build MySQL connection pool")?;
 
         let mut conn = pool.get_conn().context("failed to get initial MySQL connection")?;
 
@@ -84,7 +89,15 @@ impl MysqlSessionBackend {
                 state            VARCHAR(64)     NOT NULL DEFAULT 'idle',
                 turn_id          VARCHAR(512),
                 turn_started_at  DATETIME(6),
-                PRIMARY KEY (session_key)
+                agent_alias      VARCHAR(512),
+                channel_id       VARCHAR(512),
+                room_id          VARCHAR(512),
+                sender_id        VARCHAR(512),
+                PRIMARY KEY (session_key),
+                INDEX idx_smeta_agent_alias (agent_alias),
+                INDEX idx_smeta_channel_id  (channel_id),
+                INDEX idx_smeta_room_id     (room_id),
+                INDEX idx_smeta_sender_id   (sender_id)
              ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         )
         .context("failed to create session_metadata table")?;
@@ -180,7 +193,8 @@ impl SessionBackend for MysqlSessionBackend {
             return Vec::new();
         };
         conn.exec_map(
-            "SELECT session_key, name, created_at, last_activity, message_count
+            "SELECT session_key, name, created_at, last_activity, message_count,
+                    agent_alias, channel_id, room_id, sender_id
              FROM session_metadata ORDER BY last_activity DESC",
             (),
             map_row,
@@ -225,7 +239,8 @@ impl SessionBackend for MysqlSessionBackend {
         let pattern = format!("%{kw}%");
         conn.exec_map(
             "SELECT DISTINCT s.session_key, m.name, m.created_at,
-                    m.last_activity, m.message_count
+                    m.last_activity, m.message_count,
+                    m.agent_alias, m.channel_id, m.room_id, m.sender_id
              FROM sessions s
              JOIN session_metadata m USING (session_key)
              WHERE s.content LIKE ?
@@ -322,7 +337,8 @@ impl SessionBackend for MysqlSessionBackend {
         };
         // MySQL has no NULLS LAST; achieve it with IS NULL (1 for NULL → sorts last).
         conn.exec_map(
-            "SELECT session_key, name, created_at, last_activity, message_count
+            "SELECT session_key, name, created_at, last_activity, message_count,
+                    agent_alias, channel_id, room_id, sender_id
              FROM session_metadata WHERE state = 'running'
              ORDER BY (turn_started_at IS NULL), turn_started_at ASC",
             (),
@@ -336,7 +352,8 @@ impl SessionBackend for MysqlSessionBackend {
             return Vec::new();
         };
         conn.exec_map(
-            "SELECT session_key, name, created_at, last_activity, message_count
+            "SELECT session_key, name, created_at, last_activity, message_count,
+                    agent_alias, channel_id, room_id, sender_id
              FROM session_metadata
              WHERE state = 'running'
                AND turn_started_at < DATE_SUB(NOW(6), INTERVAL ? SECOND)
@@ -350,7 +367,8 @@ impl SessionBackend for MysqlSessionBackend {
     fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
         let mut conn = self.pool.get_conn().ok()?;
         conn.exec_first(
-            "SELECT session_key, name, created_at, last_activity, message_count
+            "SELECT session_key, name, created_at, last_activity, message_count,
+                    agent_alias, channel_id, room_id, sender_id
              FROM session_metadata WHERE session_key = ?",
             (session_key,),
         )
@@ -361,18 +379,25 @@ impl SessionBackend for MysqlSessionBackend {
 
 // ── Row mapping ───────────────────────────────────────────────────────────
 
-/// Map a `(session_key, name, created_at, last_activity, message_count)` row.
+/// Map a 9-column metadata row from `session_metadata`.
+///
+/// Columns: `session_key, name, created_at, last_activity, message_count,
+///           agent_alias, channel_id, room_id, sender_id`.
 ///
 /// `created_at` and `last_activity` are MySQL `DATETIME(6)` values, which
 /// the `mysql` crate deserialises as `chrono::NaiveDateTime`.  We treat all
 /// values as UTC (enforced by `SET time_zone = '+00:00'` on connect).
 fn map_row(
-    (key, name, created_at, last_activity, count): (
+    (key, name, created_at, last_activity, count, agent_alias, channel_id, room_id, sender_id): (
         String,
         Option<String>,
         chrono::NaiveDateTime,
         chrono::NaiveDateTime,
         u64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
     ),
 ) -> SessionMetadata {
     SessionMetadata {
@@ -381,6 +406,10 @@ fn map_row(
         created_at: DateTime::from_naive_utc_and_offset(created_at, Utc),
         last_activity: DateTime::from_naive_utc_and_offset(last_activity, Utc),
         message_count: count as usize,
+        agent_alias,
+        channel_id,
+        room_id,
+        sender_id,
     }
 }
 
