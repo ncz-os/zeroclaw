@@ -52,7 +52,6 @@ use odbc_api::{
     buffers::TextRowSet,
     Connection, Environment,
 };
-use parking_lot::Mutex;
 use r2d2::ManageConnection;
 use r2d2::Pool;
 use std::sync::LazyLock;
@@ -219,7 +218,7 @@ fn is_duplicate_object(e: &odbc_api::Error) -> bool {
 fn select_rows(
     conn: &Connection<'static>,
     sql: &str,
-    params: impl odbc_api::IntoParameters,
+    params: impl odbc_api::IntoParameter,
 ) -> Vec<Vec<Option<String>>> {
     let cursor = match conn.execute(sql, params) {
         Ok(Some(c)) => c,
