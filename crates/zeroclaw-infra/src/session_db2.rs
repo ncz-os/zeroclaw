@@ -51,7 +51,7 @@ use chrono::{DateTime, Utc};
 use odbc_api::{
     buffers::TextRowSet,
     parameter::{VarCharBox, VarCharSlice},
-    Connection, Environment, ParameterCollectionRef,
+    Connection, Cursor, Environment, ParameterCollectionRef, ResultSetMetadata,
 };
 use r2d2::ManageConnection;
 use r2d2::Pool;
