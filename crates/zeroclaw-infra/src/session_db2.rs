@@ -174,11 +174,28 @@ impl Db2SessionBackend {
                 NAME             VARCHAR(1024),
                 STATE            VARCHAR(64) DEFAULT 'idle' NOT NULL,
                 TURN_ID          VARCHAR(512),
-                TURN_STARTED_AT  TIMESTAMP WITH TIME ZONE
+                TURN_STARTED_AT  TIMESTAMP WITH TIME ZONE,
+                AGENT_ALIAS      VARCHAR(512),
+                CHANNEL_ID       VARCHAR(512),
+                ROOM_ID          VARCHAR(512),
+                SENDER_ID        VARCHAR(512)
              )",
             (),
         )
         .context("failed to create ZC_SESSION_META")?;
+
+        for idx_sql in [
+            "CREATE INDEX IDX_ZC_SMETA_AGENT ON ZC_SESSION_META(AGENT_ALIAS)",
+            "CREATE INDEX IDX_ZC_SMETA_CHAN  ON ZC_SESSION_META(CHANNEL_ID)",
+            "CREATE INDEX IDX_ZC_SMETA_ROOM  ON ZC_SESSION_META(ROOM_ID)",
+            "CREATE INDEX IDX_ZC_SMETA_SEND  ON ZC_SESSION_META(SENDER_ID)",
+        ] {
+            if let Err(e) = conn.execute(idx_sql, ()) {
+                if !is_duplicate_object(&e) {
+                    return Err(e).context("failed to create ZC_SESSION_META index")?;
+                }
+            }
+        }
 
         Ok(Self { pool })
     }
@@ -264,8 +281,9 @@ fn fmt_ts(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// Build `SessionMetadata` from a 5-column row
-/// `(SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT)`.
+/// Build `SessionMetadata` from a 9-column row
+/// `(SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+///   AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID)`.
 fn row_to_meta(row: &[Option<String>]) -> SessionMetadata {
     let count = col_str(row, 4).parse::<i64>().unwrap_or(0);
     SessionMetadata {
@@ -274,6 +292,10 @@ fn row_to_meta(row: &[Option<String>]) -> SessionMetadata {
         created_at: parse_ts(row, 2),
         last_activity: parse_ts(row, 3),
         message_count: count as usize,
+        agent_alias: col_opt(row, 5),
+        channel_id: col_opt(row, 6),
+        room_id: col_opt(row, 7),
+        sender_id: col_opt(row, 8),
     }
 }
 
@@ -377,7 +399,8 @@ impl SessionBackend for Db2SessionBackend {
         let Ok(g) = self.pool.get() else { return Vec::new() };
         select_rows(
             &g.0,
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META ORDER BY LAST_ACTIVITY DESC",
             (),
         )
@@ -432,7 +455,8 @@ impl SessionBackend for Db2SessionBackend {
         select_rows(
             conn,
             "SELECT DISTINCT s.SESSION_KEY, m.NAME, m.CREATED_AT,
-                    m.LAST_ACTIVITY, m.MESSAGE_COUNT
+                    m.LAST_ACTIVITY, m.MESSAGE_COUNT,
+                    m.AGENT_ALIAS, m.CHANNEL_ID, m.ROOM_ID, m.SENDER_ID
              FROM ZC_SESSIONS s
              JOIN ZC_SESSION_META m ON s.SESSION_KEY = m.SESSION_KEY
              WHERE LOWER(CAST(s.CONTENT AS VARCHAR(8192))) LIKE ?
@@ -546,7 +570,8 @@ impl SessionBackend for Db2SessionBackend {
         let Ok(g) = self.pool.get() else { return Vec::new() };
         select_rows(
             &g.0,
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META WHERE STATE = 'running'
              ORDER BY TURN_STARTED_AT ASC NULLS LAST",
             (),
@@ -564,7 +589,8 @@ impl SessionBackend for Db2SessionBackend {
         );
         select_rows(
             &g.0,
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META
              WHERE STATE = 'running'
                AND TURN_STARTED_AT < TIMESTAMP(?)
@@ -580,7 +606,8 @@ impl SessionBackend for Db2SessionBackend {
         let g = self.pool.get().ok()?;
         let rows = select_rows(
             &g.0,
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
             &session_key,
         );

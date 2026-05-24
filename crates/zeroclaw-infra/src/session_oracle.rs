@@ -141,8 +141,16 @@ impl OracleSessionBackend {
                 NAME             VARCHAR2(1024),
                 STATE            VARCHAR2(64) DEFAULT 'idle' NOT NULL,
                 TURN_ID          VARCHAR2(512),
-                TURN_STARTED_AT  TIMESTAMP WITH TIME ZONE
+                TURN_STARTED_AT  TIMESTAMP WITH TIME ZONE,
+                AGENT_ALIAS      VARCHAR2(512),
+                CHANNEL_ID       VARCHAR2(512),
+                ROOM_ID          VARCHAR2(512),
+                SENDER_ID        VARCHAR2(512)
              )",
+            "CREATE INDEX IDX_ZC_SMETA_AGENT ON ZC_SESSION_META(AGENT_ALIAS)",
+            "CREATE INDEX IDX_ZC_SMETA_CHAN  ON ZC_SESSION_META(CHANNEL_ID)",
+            "CREATE INDEX IDX_ZC_SMETA_ROOM  ON ZC_SESSION_META(ROOM_ID)",
+            "CREATE INDEX IDX_ZC_SMETA_SENDER ON ZC_SESSION_META(SENDER_ID)",
         ];
 
         for &ddl in ddl_statements {
@@ -267,7 +275,8 @@ impl SessionBackend for OracleSessionBackend {
         };
         let conn = &mut g.0;
         let Ok(rows) = conn.query(
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META ORDER BY LAST_ACTIVITY DESC",
             &[],
         ) else {
@@ -324,7 +333,8 @@ impl SessionBackend for OracleSessionBackend {
         let pattern = format!("%{}%", kw.to_lowercase());
         let Ok(rows) = conn.query(
             "SELECT DISTINCT s.SESSION_KEY, m.NAME, m.CREATED_AT,
-                    m.LAST_ACTIVITY, m.MESSAGE_COUNT
+                    m.LAST_ACTIVITY, m.MESSAGE_COUNT,
+                    m.AGENT_ALIAS, m.CHANNEL_ID, m.ROOM_ID, m.SENDER_ID
              FROM ZC_SESSIONS s
              JOIN ZC_SESSION_META m ON s.SESSION_KEY = m.SESSION_KEY
              WHERE LOWER(s.CONTENT) LIKE :1
@@ -438,7 +448,8 @@ impl SessionBackend for OracleSessionBackend {
         };
         let conn = &mut g.0;
         let Ok(rows) = conn.query(
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META WHERE STATE = 'running'
              ORDER BY TURN_STARTED_AT ASC NULLS LAST",
             &[],
@@ -455,7 +466,8 @@ impl SessionBackend for OracleSessionBackend {
         let conn = &mut g.0;
         let secs = threshold_secs as i64;
         let Ok(rows) = conn.query(
-            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+            "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                    AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
              FROM ZC_SESSION_META
              WHERE STATE = 'running'
                AND TURN_STARTED_AT < SYSTIMESTAMP - NUMTODSINTERVAL(:1, 'SECOND')
@@ -472,7 +484,8 @@ impl SessionBackend for OracleSessionBackend {
         let conn = &mut g.0;
         let mut rows = conn
             .query(
-                "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT
+                "SELECT SESSION_KEY, NAME, CREATED_AT, LAST_ACTIVITY, MESSAGE_COUNT,
+                        AGENT_ALIAS, CHANNEL_ID, ROOM_ID, SENDER_ID
                  FROM ZC_SESSION_META WHERE SESSION_KEY = :1",
                 &[&session_key],
             )
@@ -485,6 +498,10 @@ impl SessionBackend for OracleSessionBackend {
             created_at: row.get(2).unwrap_or_else(|_| Utc::now()),
             last_activity: row.get(3).unwrap_or_else(|_| Utc::now()),
             message_count: count as usize,
+            agent_alias: row.get(5).unwrap_or(None),
+            channel_id: row.get(6).unwrap_or(None),
+            room_id: row.get(7).unwrap_or(None),
+            sender_id: row.get(8).unwrap_or(None),
         })
     }
 }
@@ -501,6 +518,10 @@ fn rows_to_metadata(rows: oracle::ResultSet<oracle::Row>) -> Vec<SessionMetadata
                 created_at: row.get(2).unwrap_or_else(|_| Utc::now()),
                 last_activity: row.get(3).unwrap_or_else(|_| Utc::now()),
                 message_count: count as usize,
+                agent_alias: row.get(5).unwrap_or(None),
+                channel_id: row.get(6).unwrap_or(None),
+                room_id: row.get(7).unwrap_or(None),
+                sender_id: row.get(8).unwrap_or(None),
             }
         })
         .collect()
