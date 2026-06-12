@@ -166,6 +166,8 @@
 - `install.sh` rewritten from scratch for the workspace split — correctly handles the
   new crate layout and binary paths (#5666).
 - AUR package migrated from `zeroclaw` to `zeroclawlabs` (#5544).
+- AUR publish now fails fast when the SSH auth probe cannot confirm authentication,
+  preventing an unauthenticated clone attempt from producing a less actionable error.
 - Daemon supervisor and onboarding launch checks now include the webhook channel (#5799).
 
 ### Dependencies & Security Advisories

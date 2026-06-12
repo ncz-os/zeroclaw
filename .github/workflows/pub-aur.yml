@@ -154,9 +154,12 @@ jobs:
           echo "::endgroup::"
 
           # Test SSH connectivity before attempting clone — fail fast with actionable error
-          if ! ssh -T -o BatchMode=yes -o ConnectTimeout=10 aur@aur.archlinux.org 2>&1 | grep -qi "authenticated"; then
-            echo "::warning::SSH connectivity test did not confirm authentication."
-            echo "::warning::Ensure the AUR_SSH_KEY public key is registered at https://aur.archlinux.org/account (SSH Keys tab) for the account that owns the zeroclaw package."
+          auth_probe_output="$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 aur@aur.archlinux.org 2>&1 || true)"
+          if ! grep -qi "authenticated" <<<"$auth_probe_output"; then
+            echo "::error::SSH connectivity test did not confirm AUR authentication."
+            echo "::error::Ensure the AUR_SSH_KEY public key is registered at https://aur.archlinux.org/account (SSH Keys tab) for the account that owns the zeroclawlabs package."
+            printf '%s\n' "$auth_probe_output"
+            exit 1
           fi
 
           tmp_dir="$(mktemp -d)"
