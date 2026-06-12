@@ -1667,7 +1667,7 @@ pub struct SkillsConfig {
     #[serde(default)]
     pub allow_scripts: bool,
     /// URL of the skills registry repository for bare-name installs.
-    /// Default: `https://github.com/zeroclaw-labs/zeroclaw-skills`
+    /// Default: `https://github.com/zeroclaw-labs/zeroclaw-skills.git`
     #[serde(default)]
     pub registry_url: Option<String>,
     /// Controls how skills are injected into the system prompt.

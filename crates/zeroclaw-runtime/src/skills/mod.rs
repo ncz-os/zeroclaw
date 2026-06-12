@@ -28,7 +28,7 @@ const CLAWHUB_DOWNLOAD_API: &str = "https://clawhub.ai/api/v1/download";
 const MAX_CLAWHUB_ZIP_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 
 // ─── Skills registry (zeroclaw-skills) ────────────────────────────────────────
-const SKILLS_REGISTRY_REPO_URL: &str = "https://github.com/zeroclaw-labs/zeroclaw-skills";
+const SKILLS_REGISTRY_REPO_URL: &str = "https://github.com/zeroclaw-labs/zeroclaw-skills.git";
 const SKILLS_REGISTRY_DIR_NAME: &str = "skills-registry";
 const SKILLS_REGISTRY_SYNC_MARKER: &str = ".zeroclaw-skills-registry-sync";
 const SKILLS_REGISTRY_SYNC_INTERVAL_SECS: u64 = 60 * 60 * 24;
