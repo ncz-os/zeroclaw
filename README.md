@@ -733,3 +733,5 @@ This list is generated from the GitHub contributors graph and updates automatica
     </picture>
   </a>
 </p>
+
+<!-- Review gate exercise: README comment-only change. -->
