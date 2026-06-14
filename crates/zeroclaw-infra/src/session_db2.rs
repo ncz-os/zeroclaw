@@ -161,10 +161,10 @@ impl Db2SessionBackend {
             "CREATE INDEX IDX_ZC_SESS_KEY    ON ZC_SESSIONS(SESSION_KEY)",
             "CREATE INDEX IDX_ZC_SESS_KEY_ID ON ZC_SESSIONS(SESSION_KEY, ID)",
         ] {
-            if let Err(e) = conn.execute(idx_sql, ()) {
-                if !is_duplicate_object(&e) {
-                    return Err(e).context("failed to create ZC_SESSIONS index")?;
-                }
+            if let Err(e) = conn.execute(idx_sql, ())
+                && !is_duplicate_object(&e)
+            {
+                return Err(e).context("failed to create ZC_SESSIONS index")?;
             }
         }
 
@@ -193,10 +193,10 @@ impl Db2SessionBackend {
             "CREATE INDEX IDX_ZC_SMETA_ROOM  ON ZC_SESSION_META(ROOM_ID)",
             "CREATE INDEX IDX_ZC_SMETA_SEND  ON ZC_SESSION_META(SENDER_ID)",
         ] {
-            if let Err(e) = conn.execute(idx_sql, ()) {
-                if !is_duplicate_object(&e) {
-                    return Err(e).context("failed to create ZC_SESSION_META index")?;
-                }
+            if let Err(e) = conn.execute(idx_sql, ())
+                && !is_duplicate_object(&e)
+            {
+                return Err(e).context("failed to create ZC_SESSION_META index")?;
             }
         }
 
@@ -532,13 +532,12 @@ impl SessionBackend for Db2SessionBackend {
         let conn = &g.0;
 
         // Check existence before delete so we can return an accurate bool.
-        let exists = select_rows(
+        let exists = !select_rows(
             conn,
             "SELECT 1 FROM ZC_SESSION_META WHERE SESSION_KEY = ?",
             &VarCharSlice::new(session_key.as_bytes()),
         )
-        .first()
-        .is_some();
+        .is_empty();
 
         if !exists {
             return Ok(false);

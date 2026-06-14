@@ -330,6 +330,10 @@ channel-feishu = ["channel-lark"]
 whatsapp-web = ["zeroclaw-channels/whatsapp-web"]
 voice-wake = ["zeroclaw-channels/voice-wake"]
 memory-postgres = ["zeroclaw-memory/memory-postgres"]
+session-backend-postgres = ["zeroclaw-infra/backend-postgres"]
+session-backend-oracle = ["zeroclaw-infra/backend-oracle"]
+session-backend-db2 = ["zeroclaw-infra/backend-db2"]
+session-backend-mysql = ["zeroclaw-infra/backend-mysql"]
 
 # Backends and platform flags — each forwards to ONE crate
 observability-prometheus = [
@@ -367,6 +371,7 @@ ci-all = [
     "sandbox-landlock", "sandbox-bubblewrap",
     "browser-native", "plugins-wasm", "probe", "rag-pdf",
     "webauthn", "memory-postgres",
+    "session-backend-postgres", "session-backend-oracle", "session-backend-db2", "session-backend-mysql",
 ]
 
 [profile.dev]
