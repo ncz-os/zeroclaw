@@ -195,6 +195,9 @@ jobs:
           - name: no default features
             args: --no-default-features
             sys_deps: ""
+          - name: session backends
+            args: -p zeroclaw-infra --features backend-postgres,backend-oracle,backend-db2,backend-mysql
+            sys_deps: ""
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
