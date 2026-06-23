@@ -57,12 +57,24 @@ pub(crate) fn collect_tool_results(
         if !loop_ignore_tools.contains(tool_name.as_str()) {
             detection_relevant_output.push_str(&outcome.output);
 
-            // Feed the pattern-based loop detector with name + args + result.
+            // Feed the pattern-based loop detector with name + args + result —
+            // but only for *successful* calls. Failed calls (e.g. rate-limit /
+            // action-budget errors, not-found, permission denials) return
+            // identical, path-independent error strings; counting them as
+            // "no progress" (different args, identical result) escalates a
+            // transient, recoverable failure into a hard turn abort and hides
+            // the real cause. The detector exists to catch productive-but-stuck
+            // loops — identical *successful* output (see #7143) — not walls of
+            // identical errors the model can still react to.
             let args = tool_calls
                 .get(result_index)
                 .map(|c| &c.arguments)
                 .unwrap_or(&serde_json::Value::Null);
-            let det_result = loop_detector.record(&tool_name, args, &outcome.output);
+            let det_result = if outcome.success {
+                loop_detector.record(&tool_name, args, &outcome.output)
+            } else {
+                crate::agent::loop_detector::LoopDetectionResult::Ok
+            };
             match det_result {
                 crate::agent::loop_detector::LoopDetectionResult::Ok => {}
                 crate::agent::loop_detector::LoopDetectionResult::Warning(ref msg) => {
@@ -209,4 +221,83 @@ pub(crate) fn check_identical_output_abort(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::loop_detector::{LoopDetector, LoopDetectorConfig};
+    use crate::agent::tool_execution::ToolExecutionOutcome;
+    use zeroclaw_tool_call_parser::ParsedToolCall;
+
+    const RATE_LIMIT_ERR: &str = "Rate limit exceeded: too many actions in the last hour";
+
+    fn outcome(output: &str, success: bool) -> ToolExecutionOutcome {
+        ToolExecutionOutcome {
+            output: output.to_string(),
+            success,
+            error_reason: if success {
+                None
+            } else {
+                Some(output.to_string())
+            },
+            duration: Duration::from_millis(1),
+            receipt: None,
+        }
+    }
+
+    /// Run one results-collection pass over `n` `file_read` calls that each use
+    /// different args but return an identical `output` string, with the given
+    /// `success` flag.
+    fn run(n: usize, output: &str, success: bool) -> Result<CollectedResults> {
+        let mut detector = LoopDetector::new(LoopDetectorConfig::default());
+        let ignore: HashSet<&str> = HashSet::new();
+        let mut history: Vec<ChatMessage> = Vec::new();
+        let mut tool_calls: Vec<ParsedToolCall> = Vec::new();
+        let mut ordered: Vec<Option<(String, Option<String>, ToolExecutionOutcome)>> = Vec::new();
+        for i in 0..n {
+            tool_calls.push(ParsedToolCall {
+                name: "file_read".to_string(),
+                arguments: serde_json::json!({ "path": format!("file_{i}.rs") }),
+                tool_call_id: None,
+            });
+            ordered.push(Some((
+                "file_read".to_string(),
+                None,
+                outcome(output, success),
+            )));
+        }
+        collect_tool_results(
+            ordered,
+            &tool_calls,
+            &mut history,
+            &mut detector,
+            &ignore,
+            10_000,
+            None,
+            "test-model",
+            0,
+            "turn-test",
+        )
+    }
+
+    #[test]
+    fn failed_tool_results_do_not_trip_no_progress_breaker() {
+        // Many failed reads (different paths, identical rate-limit error) must
+        // NOT abort the turn: a recoverable rate-limit/budget error is not a
+        // "no progress" exploration loop. Regression for the circuit breaker
+        // firing on `file_read` "called N times ... identical results".
+        assert!(run(8, RATE_LIMIT_ERR, false).is_ok());
+    }
+
+    #[test]
+    fn successful_identical_results_still_trip_no_progress_breaker() {
+        // Identical *successful* output across different args is the genuine
+        // stuck-loop signal (#7143) and must still hard-abort the turn.
+        let err = match run(8, "byte-identical successful output", true) {
+            Ok(_) => panic!("expected the no-progress circuit breaker to abort the turn"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("loop detector"), "got: {err}");
+    }
 }
