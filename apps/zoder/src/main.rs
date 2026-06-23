@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use zeroclaw_api::model_provider::{ChatMessage, ChatRequest};
 use zeroclaw_config::cost::{CostTracker, TokenUsage};
 use zeroclaw_config::schema::CostConfig;
 use zeroclaw_consensus::{Panelist, ReviewMode, run_review};
@@ -103,6 +104,22 @@ enum CorpusCmd {
     Refresh,
     /// Show a summary of the current corpus.
     Show,
+    /// Latency-bench models and write throughput scores into the corpus so
+    /// `zoder route` can rank by measured speed.
+    Bench(BenchArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct BenchArgs {
+    /// Comma-separated model ids to bench (defaults to the free corpus).
+    #[arg(long)]
+    models: Option<String>,
+    /// Bench every served model, not just the free corpus.
+    #[arg(long)]
+    all: bool,
+    /// Samples per model; the median is recorded.
+    #[arg(long, default_value_t = 3)]
+    samples: usize,
 }
 
 fn main() -> Result<()> {
@@ -433,6 +450,113 @@ async fn cmd_models() -> Result<()> {
     Ok(())
 }
 
+fn median(v: &mut [f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+fn latency_class(tps: f64) -> &'static str {
+    if tps >= 50.0 {
+        "fast"
+    } else if tps >= 20.0 {
+        "medium"
+    } else {
+        "slow"
+    }
+}
+
+async fn cmd_corpus_bench(args: BenchArgs) -> Result<()> {
+    let provider = provider()?;
+    let mut corpus = load_corpus();
+
+    let targets: Vec<String> = if let Some(csv) = &args.models {
+        parse_csv(csv)
+    } else if args.all {
+        provider.list_models().await.context("list models")?
+    } else {
+        let free: Vec<String> = corpus.free_chat().map(|m| m.id.clone()).collect();
+        if free.is_empty() {
+            anyhow::bail!(
+                "no free models in corpus to bench. Run `zoder corpus refresh` first, or pass \
+                 --models a,b,c / --all."
+            );
+        }
+        free
+    };
+
+    let samples = args.samples.max(1);
+    println!(
+        "benching {} model(s), {} sample(s) each...",
+        targets.len(),
+        samples
+    );
+
+    let mut benched = 0usize;
+    for id in &targets {
+        let mut latencies: Vec<f64> = Vec::new();
+        let mut tps: Vec<f64> = Vec::new();
+        let mut last_err: Option<String> = None;
+        for _ in 0..samples {
+            let msgs = [ChatMessage::user("Reply with exactly one word: pong")];
+            let req = ChatRequest {
+                messages: &msgs,
+                tools: None,
+                thinking: None,
+            };
+            let started = std::time::Instant::now();
+            match provider.chat(req, id, Some(0.0)).await {
+                Ok(resp) => {
+                    let ms = started.elapsed().as_millis() as f64;
+                    let out = resp
+                        .usage
+                        .as_ref()
+                        .and_then(|u| u.output_tokens)
+                        .unwrap_or_else(|| {
+                            (resp.text.as_deref().unwrap_or("").len() as u64 / 4).max(1)
+                        });
+                    let secs = (ms / 1000.0).max(0.001);
+                    latencies.push(ms);
+                    tps.push(out as f64 / secs);
+                }
+                Err(e) => last_err = Some(e.to_string()),
+            }
+        }
+        if latencies.is_empty() {
+            println!("  [ERR] {id}: {}", last_err.unwrap_or_default());
+            continue;
+        }
+        let ms_p50 = median(&mut latencies);
+        let tps_p50 = median(&mut tps);
+        if let Some(entry) = corpus.models.iter_mut().find(|m| m.id == *id) {
+            entry.total_ms_p50 = Some(ms_p50);
+            entry.tok_per_s_p50 = Some(tps_p50);
+            entry.latency_score = Some(tps_p50);
+            entry.latency_class = Some(latency_class(tps_p50).to_string());
+        }
+        benched += 1;
+        println!(
+            "  [ok] {id}: {ms_p50:.0} ms, {tps_p50:.1} tok/s ({})",
+            latency_class(tps_p50)
+        );
+    }
+
+    corpus.save(&corpus_path()).context("save corpus")?;
+    println!(
+        "benched {benched}/{} model(s); latency scores written. `zoder route --tier fast` now \
+         ranks by measured throughput.",
+        targets.len()
+    );
+    Ok(())
+}
+
 /// True when an endpoint reports an explicit zero rate for both prompt and
 /// completion tokens (e.g. OpenRouter `:free` models). Absent pricing is
 /// treated as unknown (not free), so EIH-style paid fleets are never
@@ -457,6 +581,7 @@ async fn cmd_corpus(cmd: CorpusCmd) -> Result<()> {
             println!("free chat: {free}");
             Ok(())
         }
+        CorpusCmd::Bench(args) => cmd_corpus_bench(args).await,
         CorpusCmd::Refresh => {
             let provider = provider()?;
             let infos = provider

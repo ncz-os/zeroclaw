@@ -42,10 +42,25 @@ impl<'a> Router<'a> {
     }
 
     fn rank_key(m: &ModelEntry, tier: Tier) -> f64 {
+        // Each tier prefers its primary signal, then falls back so routing
+        // still works with partial corpus data: a freshly benched fleet has
+        // latency but no capability ELO yet, and vice versa.
         match tier {
-            Tier::Fast => m.latency_score.or(m.agentic_score).unwrap_or(0.0),
-            Tier::Strong => m.w_swe.or(m.agentic_score).unwrap_or(0.0),
-            Tier::Auto => m.agentic_score.or(m.w_swe).unwrap_or(0.0),
+            Tier::Fast => m
+                .latency_score
+                .or(m.agentic_score)
+                .or(m.w_swe)
+                .unwrap_or(0.0),
+            Tier::Strong => m
+                .w_swe
+                .or(m.agentic_score)
+                .or(m.latency_score)
+                .unwrap_or(0.0),
+            Tier::Auto => m
+                .agentic_score
+                .or(m.w_swe)
+                .or(m.latency_score)
+                .unwrap_or(0.0),
         }
     }
 
