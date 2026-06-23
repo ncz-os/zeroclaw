@@ -55,7 +55,9 @@ pub fn build_lineup(corpus: &Corpus, health: &HealthStore, n: usize) -> Vec<Rank
     let mut scored: Vec<(&ModelEntry, f64)> = corpus
         .free_chat()
         .filter(|m| !health.breaker_open(&m.id))
-        .map(|m| (m, m.agentic_score.or(m.w_swe).unwrap_or(0.0)))
+        // Capability when known, else measured throughput, so a benched fleet
+        // with no arena ELO yet still forms a ranked panel (matches Router).
+        .map(|m| (m, m.agentic_score.or(m.w_swe).or(m.latency_score).unwrap_or(0.0)))
         .filter(|(_, s)| *s > 0.0)
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
