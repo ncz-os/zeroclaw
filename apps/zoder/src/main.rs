@@ -40,6 +40,9 @@ struct Cli {
 enum Command {
     /// Fan a code review out to a free model panel and reach consensus.
     Review(ReviewArgs),
+    /// Review, then have a zeroclaw agent apply the fixes in place, looping
+    /// until the panel approves (or --rounds is hit).
+    Fix(FixArgs),
     /// Show the free-first model the router would pick for a tier.
     Route(RouteArgs),
     /// Summarize spend from ZeroClaw's cost ledger (unified with `agent`).
@@ -82,6 +85,38 @@ struct ReviewArgs {
     /// Emit the full consensus as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct FixArgs {
+    /// zeroclaw agent alias that applies the edits (or set $ZODER_FIX_AGENT).
+    /// The alias must be allowed to edit files non-interactively.
+    #[arg(long)]
+    agent: Option<String>,
+    /// Max review->fix rounds.
+    #[arg(long, default_value_t = 3)]
+    rounds: usize,
+    /// Review mode: single | panel | majority | debate.
+    #[arg(long, default_value = "majority")]
+    mode: String,
+    /// Explicit, comma-separated model ids for the review panel.
+    #[arg(long)]
+    models: Option<String>,
+    /// Max panel size when selecting from the free corpus.
+    #[arg(long, default_value_t = 3)]
+    panel: usize,
+    /// Agreement threshold for majority/debate quorum (0..1).
+    #[arg(long, default_value_t = 0.66)]
+    quorum: f64,
+    /// Sampling temperature for the review.
+    #[arg(long)]
+    temperature: Option<f64>,
+    /// Extra instruction prepended to the framed review prompt.
+    #[arg(long)]
+    instruction: Option<String>,
+    /// Review each round but never invoke the agent (show what it would do).
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -139,6 +174,7 @@ fn main() -> Result<()> {
 async fn run(command: Command) -> Result<()> {
     match command {
         Command::Review(args) => cmd_review(args).await,
+        Command::Fix(args) => cmd_fix(args).await,
         Command::Route(args) => cmd_route(args),
         Command::Spend(args) => cmd_spend(args),
         Command::Models => cmd_models().await,
@@ -218,57 +254,30 @@ fn to_panel(ranked: Vec<RankedModel>) -> Vec<Panelist> {
         .collect()
 }
 
-// ── review ───────────────────────────────────────────────────────────────────
-
-async fn cmd_review(args: ReviewArgs) -> Result<()> {
-    let subject = match &args.text {
-        Some(t) => t.clone(),
-        None => read_git_diff()?,
-    };
-    if subject.trim().is_empty() {
-        anyhow::bail!("nothing to review: no --text and no staged/unstaged git diff found");
+/// Panel precedence: explicit `--models`, then the free corpus lineup, then a
+/// default panel from `$ZODER_MODELS` so daily use needs no repeated flags.
+fn resolve_lineup(
+    corpus: &Corpus,
+    health: &HealthStore,
+    models: Option<&str>,
+    panel: usize,
+) -> Vec<Panelist> {
+    if let Some(csv) = models {
+        return to_panel(lineup_from_models(&parse_csv(csv), corpus, health));
     }
-    let prompt = frame_review(&subject, args.instruction.as_deref());
-
-    let corpus = load_corpus();
-    let health = HealthStore::load(&health_path());
-    // Panel precedence: explicit --models, then the free corpus lineup, then a
-    // default panel from $ZODER_MODELS so daily review needs no repeated flags.
-    let lineup = match &args.models {
-        Some(csv) => to_panel(lineup_from_models(&parse_csv(csv), &corpus, &health)),
-        None => {
-            let from_corpus = build_lineup(&corpus, &health, args.panel);
-            if from_corpus.is_empty() {
-                match std::env::var("ZODER_MODELS").ok().filter(|s| !s.is_empty()) {
-                    Some(csv) => to_panel(lineup_from_models(&parse_csv(&csv), &corpus, &health)),
-                    None => Vec::new(),
-                }
-            } else {
-                to_panel(from_corpus)
-            }
-        }
-    };
-    if lineup.is_empty() {
-        anyhow::bail!(
-            "no models for the panel. Pass --models a,b,c, set $ZODER_MODELS, or build a \
-             classified corpus (zoder corpus refresh)."
-        );
+    let from_corpus = build_lineup(corpus, health, panel);
+    if !from_corpus.is_empty() {
+        return to_panel(from_corpus);
     }
+    match std::env::var("ZODER_MODELS").ok().filter(|s| !s.is_empty()) {
+        Some(csv) => to_panel(lineup_from_models(&parse_csv(&csv), corpus, health)),
+        None => Vec::new(),
+    }
+}
 
-    let provider = provider()?;
-    let mode = ReviewMode::parse(&args.mode);
-    let consensus = run_review(
-        &provider,
-        lineup,
-        &prompt,
-        mode,
-        args.temperature,
-        args.quorum,
-    )
-    .await?;
-
-    // Feed spend (free models record at $0) and update routing health.
-    let mut health = health;
+/// Record per-muse spend (free models at $0) into the unified ledger and fold
+/// each call's outcome into the routing health signal (then persist it).
+fn record_consensus(consensus: &zeroclaw_consensus::Consensus, health: &mut HealthStore) {
     if let Ok(tr) = tracker() {
         for m in &consensus.muses {
             let _ = tr.record_usage_with_agent(
@@ -288,12 +297,193 @@ async fn cmd_review(args: ReviewArgs) -> Result<()> {
         }
     }
     let _ = health.save();
+}
+
+// ── review ───────────────────────────────────────────────────────────────────
+
+async fn cmd_review(args: ReviewArgs) -> Result<()> {
+    let subject = match &args.text {
+        Some(t) => t.clone(),
+        None => read_git_diff()?,
+    };
+    if subject.trim().is_empty() {
+        anyhow::bail!("nothing to review: no --text and no staged/unstaged git diff found");
+    }
+    let prompt = frame_review(&subject, args.instruction.as_deref());
+
+    let corpus = load_corpus();
+    let mut health = HealthStore::load(&health_path());
+    let lineup = resolve_lineup(&corpus, &health, args.models.as_deref(), args.panel);
+    if lineup.is_empty() {
+        anyhow::bail!(
+            "no models for the panel. Pass --models a,b,c, set $ZODER_MODELS, or build a \
+             classified corpus (zoder corpus refresh && zoder corpus bench)."
+        );
+    }
+
+    let provider = provider()?;
+    let mode = ReviewMode::parse(&args.mode);
+    let consensus = run_review(
+        &provider,
+        lineup,
+        &prompt,
+        mode,
+        args.temperature,
+        args.quorum,
+    )
+    .await?;
+
+    record_consensus(&consensus, &mut health);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&consensus)?);
         return Ok(());
     }
     print_review(&consensus);
+    Ok(())
+}
+
+// ── fix ───────────────────────────────────────────────────────────────────────
+
+async fn cmd_fix(args: FixArgs) -> Result<()> {
+    let agent = args.agent.clone().or_else(|| {
+        std::env::var("ZODER_FIX_AGENT")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
+    if !args.dry_run && agent.is_none() {
+        anyhow::bail!(
+            "no fix agent: pass --agent <alias> or set $ZODER_FIX_AGENT (the alias must be \
+             allowed to edit files non-interactively). Use --dry-run to preview reviews only."
+        );
+    }
+
+    let provider = provider()?;
+    let corpus = load_corpus();
+    let mode = ReviewMode::parse(&args.mode);
+
+    for round in 1..=args.rounds {
+        println!("\n=== fix round {round}/{} ===", args.rounds);
+        let consensus = run_fix_review(&provider, &corpus, &args, mode).await?;
+        print_review(&consensus);
+
+        if verdict_approved(&consensus) {
+            println!("\napproved by the panel in round {round}; converged.");
+            return Ok(());
+        }
+        if args.dry_run {
+            println!(
+                "\n[dry-run] would invoke agent '{}' to apply the verdict above.",
+                agent.as_deref().unwrap_or("<none>")
+            );
+            continue;
+        }
+
+        let alias = agent.as_deref().expect("checked above");
+        println!("\napplying fixes via zeroclaw agent '{alias}' (round {round}) ...");
+        run_agent_fix(alias, &consensus.verdict)?;
+    }
+
+    if args.dry_run {
+        println!(
+            "\n[dry-run] previewed {} round(s); no edits applied.",
+            args.rounds
+        );
+        return Ok(());
+    }
+
+    // Validate whatever the last round applied.
+    println!("\n=== final review ===");
+    let consensus = run_fix_review(&provider, &corpus, &args, mode).await?;
+    print_review(&consensus);
+    if verdict_approved(&consensus) {
+        println!("\nconverged after {} round(s).", args.rounds);
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "still not approved after {} round(s); re-run with more --rounds or fix manually.",
+            args.rounds
+        );
+    }
+}
+
+/// One review pass against the current working-tree diff: frame, resolve the
+/// panel, run consensus, and fold the result into spend + health.
+async fn run_fix_review(
+    provider: &OpenAiCompatibleModelProvider,
+    corpus: &Corpus,
+    args: &FixArgs,
+    mode: ReviewMode,
+) -> Result<zeroclaw_consensus::Consensus> {
+    let subject = read_git_diff()?;
+    if subject.trim().is_empty() {
+        anyhow::bail!(
+            "nothing to fix: no staged/unstaged git diff found. Make or stage changes first."
+        );
+    }
+    let prompt = frame_review(&subject, args.instruction.as_deref());
+
+    let mut health = HealthStore::load(&health_path());
+    let lineup = resolve_lineup(corpus, &health, args.models.as_deref(), args.panel);
+    if lineup.is_empty() {
+        anyhow::bail!(
+            "no models for the panel. Pass --models a,b,c, set $ZODER_MODELS, or build a \
+             classified corpus (zoder corpus refresh && zoder corpus bench)."
+        );
+    }
+    let consensus = run_review(
+        provider,
+        lineup,
+        &prompt,
+        mode,
+        args.temperature,
+        args.quorum,
+    )
+    .await?;
+    record_consensus(&consensus, &mut health);
+    Ok(consensus)
+}
+
+/// Heuristic approval gate: a "request changes" signal vetoes; otherwise an
+/// explicit approval signal (plus quorum, when measured) means converged.
+fn verdict_approved(c: &zeroclaw_consensus::Consensus) -> bool {
+    if c.winning_muse.is_none() {
+        return false;
+    }
+    let v = c.verdict.to_lowercase();
+    let requests_changes = v.contains("request change")
+        || v.contains("requests change")
+        || v.contains("request_changes")
+        || v.contains("needs changes")
+        || v.contains("changes required")
+        || v.contains("changes requested");
+    if requests_changes {
+        return false;
+    }
+    let approves = v.contains("approve")
+        || v.contains("lgtm")
+        || v.contains("looks good")
+        || v.contains("no issues");
+    // If a quorum was computed, require it; otherwise trust the verdict signal.
+    let quorum_ok = c.quorum_reached.unwrap_or(true);
+    approves && quorum_ok
+}
+
+/// Hand the verdict to a zeroclaw agent (single-shot) to edit files in place.
+fn run_agent_fix(alias: &str, verdict: &str) -> Result<()> {
+    let message = format!(
+        "A multi-model code review requested changes on the current working tree. \
+         Apply the minimal edits to address every point below, editing files in place. \
+         Do not revert unrelated work; keep changes focused.\n\n\
+         --- REVIEW VERDICT ---\n{verdict}\n--- END VERDICT ---"
+    );
+    let status = std::process::Command::new(zeroclaw_bin())
+        .args(["agent", "-a", alias, "-m", &message])
+        .status()
+        .context("spawn zeroclaw agent")?;
+    if !status.success() {
+        anyhow::bail!("zeroclaw agent '{alias}' exited with {status}");
+    }
     Ok(())
 }
 
@@ -634,15 +824,20 @@ async fn cmd_corpus(cmd: CorpusCmd) -> Result<()> {
 
 // ── passthrough to the zeroclaw binary ───────────────────────────────────────
 
-/// Replace this process with `zeroclaw <args>`. Prefers a `zeroclaw` binary
-/// next to the running `zoder` (same build), else falls back to PATH.
-fn passthrough(args: &[String]) -> Result<()> {
-    let exe = std::env::current_exe()
+/// Resolve the `zeroclaw` binary: prefer one next to the running `zoder`
+/// (same build), else fall back to PATH.
+fn zeroclaw_bin() -> String {
+    std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("zeroclaw")))
         .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "zeroclaw".to_string());
+        .unwrap_or_else(|| "zeroclaw".to_string())
+}
+
+/// Replace this process with `zeroclaw <args>`.
+fn passthrough(args: &[String]) -> Result<()> {
+    let exe = zeroclaw_bin();
 
     #[cfg(unix)]
     {
