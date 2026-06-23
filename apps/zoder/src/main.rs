@@ -364,7 +364,20 @@ async fn cmd_fix(args: FixArgs) -> Result<()> {
 
     for round in 1..=args.rounds {
         println!("\n=== fix round {round}/{} ===", args.rounds);
-        let consensus = run_fix_review(&provider, &corpus, &args, mode).await?;
+        let consensus = match run_fix_review(&provider, &corpus, &args, mode).await? {
+            Some(c) => c,
+            None if round == 1 => anyhow::bail!(
+                "nothing to fix: no staged/unstaged git diff found. Make or stage changes first."
+            ),
+            // Empty diff after a fix: the working tree matches HEAD again.
+            None => {
+                println!(
+                    "\nworking tree clean after fixes; converged in {} round(s).",
+                    round - 1
+                );
+                return Ok(());
+            }
+        };
         print_review(&consensus);
 
         if verdict_approved(&consensus) {
@@ -394,16 +407,27 @@ async fn cmd_fix(args: FixArgs) -> Result<()> {
 
     // Validate whatever the last round applied.
     println!("\n=== final review ===");
-    let consensus = run_fix_review(&provider, &corpus, &args, mode).await?;
-    print_review(&consensus);
-    if verdict_approved(&consensus) {
-        println!("\nconverged after {} round(s).", args.rounds);
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "still not approved after {} round(s); re-run with more --rounds or fix manually.",
-            args.rounds
-        );
+    match run_fix_review(&provider, &corpus, &args, mode).await? {
+        None => {
+            println!(
+                "\nworking tree clean after fixes; converged after {} round(s).",
+                args.rounds
+            );
+            Ok(())
+        }
+        Some(consensus) => {
+            print_review(&consensus);
+            if verdict_approved(&consensus) {
+                println!("\nconverged after {} round(s).", args.rounds);
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "still not approved after {} round(s); re-run with more --rounds or fix \
+                     manually.",
+                    args.rounds
+                );
+            }
+        }
     }
 }
 
@@ -414,12 +438,10 @@ async fn run_fix_review(
     corpus: &Corpus,
     args: &FixArgs,
     mode: ReviewMode,
-) -> Result<zeroclaw_consensus::Consensus> {
+) -> Result<Option<zeroclaw_consensus::Consensus>> {
     let subject = read_git_diff()?;
     if subject.trim().is_empty() {
-        anyhow::bail!(
-            "nothing to fix: no staged/unstaged git diff found. Make or stage changes first."
-        );
+        return Ok(None);
     }
     let prompt = frame_review(&subject, args.instruction.as_deref());
 
@@ -441,7 +463,7 @@ async fn run_fix_review(
     )
     .await?;
     record_consensus(&consensus, &mut health);
-    Ok(consensus)
+    Ok(Some(consensus))
 }
 
 /// Heuristic approval gate: a "request changes" signal vetoes; otherwise an
@@ -470,12 +492,20 @@ fn verdict_approved(c: &zeroclaw_consensus::Consensus) -> bool {
 }
 
 /// Hand the verdict to a zeroclaw agent (single-shot) to edit files in place.
+/// The agent's file tools may be workspace-scoped, so we pass the absolute repo
+/// root and the diff to anchor it on the right files.
 fn run_agent_fix(alias: &str, verdict: &str) -> Result<()> {
+    let root = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let diff = read_git_diff().unwrap_or_default();
     let message = format!(
-        "A multi-model code review requested changes on the current working tree. \
-         Apply the minimal edits to address every point below, editing files in place. \
-         Do not revert unrelated work; keep changes focused.\n\n\
-         --- REVIEW VERDICT ---\n{verdict}\n--- END VERDICT ---"
+        "A multi-model code review requested changes on the git working tree rooted at \
+         {root}. Edit the affected files in place under that absolute path (use absolute \
+         paths with your file tools). Apply the minimal edits to address every point in \
+         the verdict; do not revert unrelated work and keep changes focused. When done, stop.\n\n\
+         --- REVIEW VERDICT ---\n{verdict}\n--- END VERDICT ---\n\n\
+         --- CURRENT DIFF ---\n{diff}\n--- END DIFF ---"
     );
     let status = std::process::Command::new(zeroclaw_bin())
         .args(["agent", "-a", alias, "-m", &message])
