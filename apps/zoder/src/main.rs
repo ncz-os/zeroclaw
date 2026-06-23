@@ -1,0 +1,536 @@
+//! zoder — a cost-governed, free-first coding CLI distributed on top of
+//! ZeroClaw.
+//!
+//! zoder is purely additive: it adds the cost-governance and consensus-review
+//! commands (`review`, `route`, `spend`, `models`, `corpus`) and delegates
+//! everything else — `agent`, `auth`, `acp`, `gateway`, `doctor`, ... — to the
+//! `zeroclaw` binary via an exec passthrough. That gives the full Codex-class
+//! command surface without reimplementing any of it.
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use zeroclaw_config::cost::{CostTracker, TokenUsage};
+use zeroclaw_config::schema::CostConfig;
+use zeroclaw_consensus::{Panelist, ReviewMode, run_review};
+use zeroclaw_cost_governance::{
+    Corpus, HealthStore, RankedModel, Router, Tier, build_lineup, lineup_from_models,
+};
+use zeroclaw_providers::ModelProvider;
+use zeroclaw_providers::compatible::{AuthStyle, OpenAiCompatibleModelProvider};
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "zoder",
+    about = "Cost-governed, free-first coding CLI — a ZeroClaw distro.",
+    long_about = "zoder adds free-first routing, multi-model consensus review, and spend \
+visibility on top of ZeroClaw. Unrecognized subcommands (agent, auth, acp, gateway, \
+doctor, ...) pass through to the `zeroclaw` binary.",
+    disable_help_subcommand = true,
+    version
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Fan a code review out to a free model panel and reach consensus.
+    Review(ReviewArgs),
+    /// Show the free-first model the router would pick for a tier.
+    Route(RouteArgs),
+    /// Summarize spend from ZeroClaw's cost ledger (unified with `agent`).
+    Spend(SpendArgs),
+    /// List the live model ids served by the configured endpoint.
+    Models,
+    /// Manage the classified model corpus.
+    Corpus {
+        #[command(subcommand)]
+        cmd: CorpusCmd,
+    },
+    /// Any other subcommand is passed straight through to `zeroclaw`.
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+#[derive(clap::Args, Debug)]
+struct ReviewArgs {
+    /// Review mode: single | panel | majority | debate.
+    #[arg(long, default_value = "panel")]
+    mode: String,
+    /// Explicit, comma-separated model ids (bypasses corpus selection).
+    #[arg(long)]
+    models: Option<String>,
+    /// Max panel size when selecting from the free corpus.
+    #[arg(long, default_value_t = 3)]
+    panel: usize,
+    /// Agreement threshold for majority/debate quorum (0..1).
+    #[arg(long, default_value_t = 0.66)]
+    quorum: f64,
+    /// Sampling temperature.
+    #[arg(long)]
+    temperature: Option<f64>,
+    /// Extra instruction prepended to the framed review prompt.
+    #[arg(long)]
+    instruction: Option<String>,
+    /// Review this text instead of the git diff.
+    #[arg(long)]
+    text: Option<String>,
+    /// Emit the full consensus as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct RouteArgs {
+    /// Routing tier: fast | strong | auto.
+    #[arg(long, default_value = "auto")]
+    tier: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct SpendArgs {
+    /// Window: today | week | month | year | all.
+    #[arg(long, default_value = "today")]
+    period: String,
+}
+
+#[derive(Subcommand, Debug)]
+enum CorpusCmd {
+    /// Reconcile the corpus against the live served-model list.
+    Refresh,
+    /// Show a summary of the current corpus.
+    Show,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    // Passthrough is synchronous (it replaces this process); everything else
+    // needs the async provider, so only spin up tokio when we keep control.
+    if let Command::External(args) = &cli.command {
+        return passthrough(args);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?
+        .block_on(run(cli.command))
+}
+
+async fn run(command: Command) -> Result<()> {
+    match command {
+        Command::Review(args) => cmd_review(args).await,
+        Command::Route(args) => cmd_route(args),
+        Command::Spend(args) => cmd_spend(args),
+        Command::Models => cmd_models().await,
+        Command::Corpus { cmd } => cmd_corpus(cmd).await,
+        Command::External(_) => unreachable!("handled before runtime"),
+    }
+}
+
+// ── paths & resources ────────────────────────────────────────────────────────
+
+/// ZeroClaw's config/data dir. Reused so zoder's spend reads the same ledger
+/// `zeroclaw agent` writes.
+fn config_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("ZEROCLAW_CONFIG_DIR") {
+        if !d.is_empty() {
+            return PathBuf::from(d);
+        }
+    }
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().join(".zeroclaw"))
+        .unwrap_or_else(|| PathBuf::from(".zeroclaw"))
+}
+
+fn zoder_dir() -> PathBuf {
+    config_dir().join("zoder")
+}
+fn corpus_path() -> PathBuf {
+    zoder_dir().join("corpus.json")
+}
+fn health_path() -> PathBuf {
+    zoder_dir().join("health.json")
+}
+
+/// Build the inference engine from env. zoder reads the endpoint from
+/// `ZODER_BASE_URL` / `ZODER_API_KEY` for now; config.toml resolution is a
+/// follow-up that will source these from ZeroClaw's provider config.
+fn provider() -> Result<OpenAiCompatibleModelProvider> {
+    let base = std::env::var("ZODER_BASE_URL").map_err(|_| {
+        anyhow::Error::msg(
+            "set ZODER_BASE_URL to your OpenAI-compatible endpoint (e.g. https://host/v1)",
+        )
+    })?;
+    let key = std::env::var("ZODER_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
+    Ok(OpenAiCompatibleModelProvider::new(
+        "zoder",
+        "zoder",
+        &base,
+        key.as_deref(),
+        AuthStyle::Bearer,
+    )
+    .with_public_model_listing())
+}
+
+fn tracker() -> Result<CostTracker> {
+    let cfg = CostConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    CostTracker::new(cfg, &config_dir()).context("open cost ledger")
+}
+
+fn load_corpus() -> Corpus {
+    Corpus::load(&corpus_path()).unwrap_or_else(|_| Corpus {
+        source: "empty".into(),
+        arena_date: String::new(),
+        count: 0,
+        models: Vec::new(),
+    })
+}
+
+fn to_panel(ranked: Vec<RankedModel>) -> Vec<Panelist> {
+    ranked
+        .into_iter()
+        .map(|r| Panelist::new(r.model, r.base_weight, r.success_rate))
+        .collect()
+}
+
+// ── review ───────────────────────────────────────────────────────────────────
+
+async fn cmd_review(args: ReviewArgs) -> Result<()> {
+    let subject = match &args.text {
+        Some(t) => t.clone(),
+        None => read_git_diff()?,
+    };
+    if subject.trim().is_empty() {
+        anyhow::bail!("nothing to review: no --text and no staged/unstaged git diff found");
+    }
+    let prompt = frame_review(&subject, args.instruction.as_deref());
+
+    let corpus = load_corpus();
+    let health = HealthStore::load(&health_path());
+    // Panel precedence: explicit --models, then the free corpus lineup, then a
+    // default panel from $ZODER_MODELS so daily review needs no repeated flags.
+    let lineup = match &args.models {
+        Some(csv) => to_panel(lineup_from_models(&parse_csv(csv), &corpus, &health)),
+        None => {
+            let from_corpus = build_lineup(&corpus, &health, args.panel);
+            if from_corpus.is_empty() {
+                match std::env::var("ZODER_MODELS").ok().filter(|s| !s.is_empty()) {
+                    Some(csv) => to_panel(lineup_from_models(&parse_csv(&csv), &corpus, &health)),
+                    None => Vec::new(),
+                }
+            } else {
+                to_panel(from_corpus)
+            }
+        }
+    };
+    if lineup.is_empty() {
+        anyhow::bail!(
+            "no models for the panel. Pass --models a,b,c, set $ZODER_MODELS, or build a \
+             classified corpus (zoder corpus refresh)."
+        );
+    }
+
+    let provider = provider()?;
+    let mode = ReviewMode::parse(&args.mode);
+    let consensus = run_review(
+        &provider,
+        lineup,
+        &prompt,
+        mode,
+        args.temperature,
+        args.quorum,
+    )
+    .await?;
+
+    // Feed spend (free models record at $0) and update routing health.
+    let mut health = health;
+    if let Ok(tr) = tracker() {
+        for m in &consensus.muses {
+            let _ = tr.record_usage_with_agent(
+                TokenUsage::new(&m.model, m.tokens_in, m.tokens_out, 0, 0.0, 0.0, 0.0),
+                Some("zoder-review"),
+            );
+        }
+    }
+    for m in &consensus.muses {
+        match m.status {
+            zeroclaw_consensus::MuseStatus::Success => {
+                health.record_success(&m.model, m.latency_ms as f64)
+            }
+            zeroclaw_consensus::MuseStatus::Error => {
+                health.record_failure(&m.model, m.error.as_deref().unwrap_or("error"))
+            }
+        }
+    }
+    let _ = health.save();
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&consensus)?);
+        return Ok(());
+    }
+    print_review(&consensus);
+    Ok(())
+}
+
+fn parse_csv(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn frame_review(subject: &str, instruction: Option<&str>) -> String {
+    let extra = instruction.unwrap_or(
+        "Review the following change for correctness, bugs, security, and clarity. \
+         Give a clear verdict (approve / request changes) and a short, specific rationale.",
+    );
+    format!("{extra}\n\n--- BEGIN CHANGE ---\n{subject}\n--- END CHANGE ---")
+}
+
+fn print_review(c: &zeroclaw_consensus::Consensus) {
+    println!("== zoder review ==");
+    if let Some(w) = &c.winning_muse {
+        println!("verdict by: {w}  (score {:.4})", c.consensus_score);
+    } else {
+        println!("no successful muse");
+    }
+    if let Some(q) = c.quorum_reached {
+        println!(
+            "quorum: {} (threshold {:.2})",
+            if q { "reached" } else { "NOT reached" },
+            c.quorum_threshold.unwrap_or(0.0)
+        );
+    }
+    println!(
+        "panel: {} muses, {} tok in / {} tok out, {} ms",
+        c.muses.len(),
+        c.tokens_in,
+        c.tokens_out,
+        c.latency_ms
+    );
+    for m in &c.muses {
+        let status = match m.status {
+            zeroclaw_consensus::MuseStatus::Success => "ok",
+            zeroclaw_consensus::MuseStatus::Error => "ERR",
+        };
+        println!("  [{status}] {} (score {:.4})", m.model, m.final_score);
+    }
+    println!("\n--- VERDICT ---\n{}", c.verdict);
+}
+
+fn read_git_diff() -> Result<String> {
+    let staged = run_git(&["diff", "--cached"])?;
+    if !staged.trim().is_empty() {
+        return Ok(staged);
+    }
+    run_git(&["diff"])
+}
+
+fn run_git(args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .context("run git")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+// ── route ────────────────────────────────────────────────────────────────────
+
+fn cmd_route(args: RouteArgs) -> Result<()> {
+    let corpus = load_corpus();
+    let health = HealthStore::load(&health_path());
+    let router = Router::new(&corpus, &health);
+    let route = router.select(Tier::parse(&args.tier))?;
+    println!("primary:   {}", route.primary);
+    if !route.fallbacks.is_empty() {
+        println!("fallbacks: {}", route.fallbacks.join(", "));
+    }
+    println!("reason:    {}", route.reason);
+    Ok(())
+}
+
+// ── spend ────────────────────────────────────────────────────────────────────
+
+fn cmd_spend(args: SpendArgs) -> Result<()> {
+    use chrono::{Datelike, Duration, Utc};
+    let tr = tracker()?;
+    let now = Utc::now();
+    let summary = match args.period.to_ascii_lowercase().as_str() {
+        "all" => tr.get_summary_in_bounds(None, None)?,
+        "week" => {
+            let monday =
+                now.date_naive() - Duration::days(now.weekday().num_days_from_monday() as i64);
+            let from = monday.and_hms_opt(0, 0, 0).unwrap().and_utc();
+            tr.get_summary_in_bounds(Some(from), None)?
+        }
+        "month" => {
+            let first = now.date_naive().with_day(1).unwrap();
+            let from = first.and_hms_opt(0, 0, 0).unwrap().and_utc();
+            tr.get_summary_in_bounds(Some(from), None)?
+        }
+        "year" => {
+            let first = now.date_naive().with_ordinal(1).unwrap();
+            let from = first.and_hms_opt(0, 0, 0).unwrap().and_utc();
+            tr.get_summary_in_bounds(Some(from), None)?
+        }
+        _ => {
+            // "today": read from the persisted ledger (a fresh CLI process has
+            // no in-memory session totals), so use bounds, not get_summary().
+            let from = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            tr.get_summary_in_bounds(Some(from), None)?
+        }
+    };
+
+    println!("== zoder spend ({}) ==", args.period);
+    println!("cost:     ${:.4}", summary.session_cost_usd);
+    println!("day:      ${:.4}", summary.daily_cost_usd);
+    println!("month:    ${:.4}", summary.monthly_cost_usd);
+    println!("tokens:   {}", summary.total_tokens);
+    println!("requests: {}", summary.request_count);
+    if !summary.by_model.is_empty() {
+        println!("by model:");
+        let mut models: Vec<_> = summary.by_model.values().collect();
+        models.sort_by(|a, b| {
+            b.cost_usd
+                .partial_cmp(&a.cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for m in models {
+            println!(
+                "  {:<40} ${:.4}  ({} req, {} tok)",
+                m.model, m.cost_usd, m.request_count, m.total_tokens
+            );
+        }
+    }
+    Ok(())
+}
+
+// ── models / corpus ──────────────────────────────────────────────────────────
+
+async fn cmd_models() -> Result<()> {
+    let provider = provider()?;
+    let mut models = provider.list_models().await.context("list models")?;
+    models.sort();
+    for m in &models {
+        println!("{m}");
+    }
+    println!("\n{} models", models.len());
+    Ok(())
+}
+
+/// True when an endpoint reports an explicit zero rate for both prompt and
+/// completion tokens (e.g. OpenRouter `:free` models). Absent pricing is
+/// treated as unknown (not free), so EIH-style paid fleets are never
+/// misclassified.
+fn is_zero_pricing(p: &zeroclaw_api::model_provider::ModelPricing) -> bool {
+    let zero = |v: &Option<String>| {
+        v.as_deref()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|n| n == 0.0)
+            .unwrap_or(false)
+    };
+    zero(&p.prompt) && zero(&p.completion)
+}
+
+async fn cmd_corpus(cmd: CorpusCmd) -> Result<()> {
+    match cmd {
+        CorpusCmd::Show => {
+            let corpus = load_corpus();
+            println!("source:    {}", corpus.source);
+            println!("models:    {}", corpus.count);
+            let free = corpus.free_chat().count();
+            println!("free chat: {free}");
+            Ok(())
+        }
+        CorpusCmd::Refresh => {
+            let provider = provider()?;
+            let infos = provider
+                .list_models_with_pricing()
+                .await
+                .context("list models")?;
+            let served: Vec<String> = infos.iter().map(|i| i.id.clone()).collect();
+            let mut corpus = load_corpus();
+            let report = corpus.reconcile(&served);
+
+            // Honest free/paid classification from the endpoint's own pricing:
+            // a model is free only when it reports a zero prompt AND completion
+            // rate. Capability ranking (agentic_score) still comes from the
+            // external corpus builder, so freshly-classified frees are not
+            // ranked here.
+            let mut classified_free = 0usize;
+            for info in &infos {
+                let is_free = info.pricing.as_ref().is_some_and(is_zero_pricing);
+                if let Some(entry) = corpus.models.iter_mut().find(|m| m.id == info.id) {
+                    if is_free {
+                        entry.free = true;
+                        entry.paid = false;
+                        entry.kind = "chat".into();
+                        entry.route_candidate = true;
+                        entry.gated_reason = None;
+                        classified_free += 1;
+                    } else if entry.gated_reason.is_none() && !entry.free {
+                        entry.paid = true;
+                        entry.gated_reason = Some("paid: non-zero pricing".into());
+                    }
+                }
+            }
+            corpus.save(&corpus_path()).context("save corpus")?;
+            println!(
+                "corpus refreshed: +{} added, -{} retired, {} kept ({} total); {} classified free",
+                report.added.len(),
+                report.retired.len(),
+                report.kept,
+                corpus.count,
+                classified_free
+            );
+            println!(
+                "note: free/paid is classified from live pricing; capability ranking for \
+                 `zoder route` still needs the corpus builder (arena ELO + latency bench)."
+            );
+            Ok(())
+        }
+    }
+}
+
+// ── passthrough to the zeroclaw binary ───────────────────────────────────────
+
+/// Replace this process with `zeroclaw <args>`. Prefers a `zeroclaw` binary
+/// next to the running `zoder` (same build), else falls back to PATH.
+fn passthrough(args: &[String]) -> Result<()> {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("zeroclaw")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "zeroclaw".to_string());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe).args(args).exec();
+        Err(anyhow::Error::new(err).context(format!("exec {exe}")))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = std::process::Command::new(&exe)
+            .args(args)
+            .status()
+            .context(format!("spawn {exe}"))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}

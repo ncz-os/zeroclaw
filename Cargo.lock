@@ -14253,6 +14253,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-consensus"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "tokio",
+ "zeroclaw-api",
+]
+
+[[package]]
+name = "zeroclaw-cost-governance"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "zeroclaw-desktop"
 version = "0.8.1"
 dependencies = [
@@ -14949,6 +14972,23 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zoder"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "directories",
+ "serde_json",
+ "tokio",
+ "zeroclaw-api",
+ "zeroclaw-config",
+ "zeroclaw-consensus",
+ "zeroclaw-cost-governance",
+ "zeroclaw-providers",
+]
 
 [[package]]
 name = "zstd"
