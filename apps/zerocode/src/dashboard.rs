@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::client::{
     AgentStatusEntry, CostSummaryResult, CronJobEntry, CronSchedule, MemoryEntryResult,
-    MessageEntry, RpcClient, SessionEntry, StatusResult, TuiListEntry,
+    MessageEntry, OrgCost, RpcClient, SessionEntry, StatusResult, TuiListEntry,
 };
 use crate::mouse;
 use crate::theme;
@@ -81,6 +81,14 @@ pub(crate) struct Dashboard {
     sessions: Vec<SessionEntry>,
     agents: Vec<AgentStatusEntry>,
     cost: Option<CostSummaryResult>,
+    /// Per-period (day / month / quarter / YTD) cost summaries for the user's
+    /// account, fetched on the Cost tab so the dashboard mirrors a typical CLI
+    /// report's period breakdown. `(label, summary)`.
+    cost_periods: Vec<(String, CostSummaryResult)>,
+    /// Optional org-level billed snapshot (`cost/org`). Present only when the
+    /// daemon has an `org_cost.json` (an integrator's external sync); `None`
+    /// otherwise, so the organization row is simply omitted.
+    cost_org: Option<OrgCost>,
     cron_jobs: Vec<CronJobEntry>,
     memories: Vec<MemoryEntryResult>,
     memory_error: Option<String>,
@@ -145,6 +153,8 @@ impl Dashboard {
             sessions: Vec::new(),
             agents: Vec::new(),
             cost: None,
+            cost_periods: Vec::new(),
+            cost_org: None,
             cron_jobs: Vec::new(),
             memories: Vec::new(),
             memory_error: None,
@@ -277,20 +287,35 @@ impl Dashboard {
                 }
             }
             Tab::Health => {} // health already fetched above
-            Tab::Cost => match self.rpc.cost_query(None).await {
-                Ok(c) => {
-                    self.cost = Some(c);
-                    self.cost_error = None;
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("not available") {
-                        self.cost_error = Some(crate::i18n::t("zc-dashboard-cost-not-available"));
-                    } else {
-                        self.cost_error = Some(msg);
+            Tab::Cost => {
+                match self.rpc.cost_query(None).await {
+                    Ok(c) => {
+                        self.cost = Some(c);
+                        self.cost_error = None;
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("not available") {
+                            self.cost_error =
+                                Some(crate::i18n::t("zc-dashboard-cost-not-available"));
+                        } else {
+                            self.cost_error = Some(msg);
+                        }
                     }
                 }
-            },
+                // Day / month / quarter / YTD windows for the user's account,
+                // mirroring a typical CLI report. Best-effort per window.
+                let mut periods = Vec::new();
+                for (label, from, to) in cost_period_windows() {
+                    if let Ok(c) = self.rpc.cost_query_window(&from, &to, None).await {
+                        periods.push((label, c));
+                    }
+                }
+                self.cost_periods = periods;
+                // Org-level billed snapshot (present only when an integrator's
+                // external sync wrote org_cost.json). Best-effort; absence is normal.
+                self.cost_org = self.rpc.cost_org().await.ok().flatten();
+            }
             Tab::Cron => {
                 if let Ok(c) = self.rpc.cron_list().await {
                     self.cron_jobs = c.jobs;
@@ -1402,6 +1427,76 @@ impl Dashboard {
             ),
         ];
 
+        // By-period breakdown (day / month / quarter / YTD) for the user's
+        // account — mirrors a typical CLI report. Paid vs free tokens make the
+        // split explicit (free models contribute $0).
+        if !self.cost_periods.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                crate::i18n::t("zc-dashboard-section-by-period"),
+                theme::heading_style(),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {:<10} {:>12} {:>12} {:>12} {:>7}",
+                    "period", "cost($)", "paid tok", "free tok", "reqs"
+                ),
+                theme::dim_style(),
+            )));
+            for (label, summary) in &self.cost_periods {
+                let (paid_tok, free_tok) =
+                    summary.by_model.values().fold((0u64, 0u64), |(p, f), m| {
+                        if m.cost_usd > 0.0 {
+                            (p + m.total_tokens, f)
+                        } else {
+                            (p, f + m.total_tokens)
+                        }
+                    });
+                let cost_style = if summary.session_cost_usd > 0.0 {
+                    theme::accent_style()
+                } else {
+                    theme::success_style()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {label:<10}"), theme::body_style()),
+                    Span::styled(format!("{:>12.4}", summary.session_cost_usd), cost_style),
+                    Span::styled(format!("{:>12}", format_tokens(paid_tok)), theme::accent_style()),
+                    Span::styled(format!("{:>12}", format_tokens(free_tok)), theme::success_style()),
+                    Span::styled(format!("{:>7}", summary.request_count), theme::dim_style()),
+                ]));
+            }
+        }
+
+        // Organization-level billed snapshot (present only when an integrator's
+        // external sync has written org_cost.json). Shows billed YTD + a simple
+        // full-year projection for the org and the user, alongside the local
+        // engine usage above.
+        if let Some(ref org) = self.cost_org {
+            let frac = frac_year_elapsed();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                crate::i18n::t("zc-dashboard-section-org"),
+                theme::heading_style(),
+            )));
+            let org_label = org.org_label.clone().unwrap_or_else(|| "Organization".into());
+            if let Some(ref scope) = org.org {
+                lines.push(org_scope_line(&org_label, scope, frac));
+            }
+            if let Some(ref scope) = org.personal {
+                lines.push(org_scope_line("You (billed)", scope, frac));
+            }
+            if !org.generated.is_empty() || org.year != 0 {
+                let mut note = String::from("  ");
+                if org.year != 0 {
+                    note.push_str(&format!("FY{} ", org.year));
+                }
+                if !org.generated.is_empty() {
+                    note.push_str(&format!("as of {}", org.generated));
+                }
+                lines.push(Line::from(Span::styled(note, theme::dim_style())));
+            }
+        }
+
         if !c.by_model.is_empty() {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -2172,6 +2267,73 @@ fn format_tokens(tokens: u64) -> String {
     } else {
         tokens.to_string()
     }
+}
+
+/// `(label, from, to)` RFC3339 windows for day / month / quarter / YTD in local
+/// time, period-to-date. Matches the conventional CLI report windows so the
+/// dashboard and CLI agree on what each period means. The daemon parses these
+/// bounds and converts to UTC.
+fn cost_period_windows() -> Vec<(String, String, String)> {
+    use chrono::{Datelike, Local, TimeZone};
+    let now = Local::now();
+    let to = now.to_rfc3339();
+    let start = |month: u32, day: u32| -> String {
+        Local
+            .with_ymd_and_hms(now.year(), month, day, 0, 0, 0)
+            .single()
+            .unwrap_or(now)
+            .to_rfc3339()
+    };
+    let quarter = (now.month() - 1) / 3; // 0..=3
+    vec![
+        ("Today".to_string(), start(now.month(), now.day()), to.clone()),
+        ("Month".to_string(), start(now.month(), 1), to.clone()),
+        (format!("Q{}", quarter + 1), start(quarter * 3 + 1, 1), to.clone()),
+        (format!("YTD {}", now.year()), start(1, 1), to),
+    ]
+}
+
+/// One organization/personal billed-scope row:
+/// `label  YTD $X (N tok)  proj/yr $Y`.
+///
+/// The projection prefers a run-rate (last FULL calendar month × 12, which
+/// captures acceleration); it falls back to linearly scaling YTD by the
+/// fraction of the year elapsed when fewer than two months are present. This
+/// mirrors the CLI report's projection.
+fn org_scope_line(label: &str, scope: &crate::client::OrgScopeStat, frac: f64) -> Line<'static> {
+    let runrate = if scope.monthly.len() >= 2 {
+        Some(scope.monthly[scope.monthly.len() - 2].cost_usd * 12.0)
+    } else {
+        scope.monthly.last().map(|m| m.cost_usd * 12.0)
+    };
+    let proj = runrate.unwrap_or(if frac > 0.0 {
+        scope.ytd_cost_usd / frac
+    } else {
+        0.0
+    });
+    Line::from(vec![
+        Span::styled(format!("  {label:<14}"), theme::body_style()),
+        Span::styled(
+            format!("YTD ${:>14.2}", scope.ytd_cost_usd),
+            theme::accent_style(),
+        ),
+        Span::styled(
+            format!("  {:>10} tok", format_tokens(scope.ytd_tokens)),
+            theme::dim_style(),
+        ),
+        Span::styled(format!("   proj/yr ${proj:>14.2}"), theme::warn_style()),
+    ])
+}
+
+/// Fraction of the current local year elapsed (leap-year aware). Used to scale
+/// a billed YTD into a naive full-year projection, matching the CLI report.
+fn frac_year_elapsed() -> f64 {
+    use chrono::{Datelike, Local};
+    let now = Local::now();
+    let y = now.year();
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = if leap { 366.0 } else { 365.0 };
+    now.ordinal() as f64 / days
 }
 
 fn format_uptime(secs: u64) -> String {
