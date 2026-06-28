@@ -765,6 +765,44 @@ mod tests {
         }
     }
 
+    /// Regression: a legacy ledger whose records were concatenated onto a
+    /// single line (the pre-atomic-append interleave bug) must still have all
+    /// of its records recovered by `for_each_record`, so historical cost data
+    /// keeps aggregating.
+    #[test]
+    fn recovers_concatenated_records_from_legacy_ledger() {
+        let tmp = TempDir::new().unwrap();
+        // Write two real, valid records through the normal (now-atomic) path.
+        let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
+        tracker
+            .record_usage(TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0, 0.0))
+            .unwrap();
+        tracker
+            .record_usage(TokenUsage::new("test/model", 2000, 800, 0, 1.0, 2.0, 0.0))
+            .unwrap();
+
+        // Simulate the legacy interleaved-write artifact: collapse the two
+        // newline-separated records into one concatenated `{..}{..}` line.
+        let path = resolve_storage_path(tmp.path()).unwrap();
+        let joined: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>()
+            .join("");
+        std::fs::write(&path, format!("{joined}\n")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            1,
+            "ledger should now be a single concatenated line"
+        );
+
+        // A fresh storage over the corrupted ledger still recovers both records.
+        let storage = CostStorage::new(&path).unwrap();
+        let mut count = 0usize;
+        storage.for_each_record(|_| count += 1).unwrap();
+        assert_eq!(count, 2, "both concatenated records should be recovered");
+    }
+
     #[test]
     fn cost_tracker_initialization() {
         let tmp = TempDir::new().unwrap();
