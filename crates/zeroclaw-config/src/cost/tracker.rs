@@ -558,16 +558,38 @@ impl CostStorage {
             match serde_json::from_str::<CostRecord>(trimmed) {
                 Ok(record) => on_record(record),
                 Err(error) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    // A single line that fails to parse may be two or more
+                    // records concatenated without a newline (a legacy
+                    // interleaved-write artifact from before the atomic-append
+                    // fix). Try to stream multiple records out of it before
+                    // giving up, so old corrupted ledgers still aggregate fully.
+                    let mut recovered = 0usize;
+                    let stream =
+                        serde_json::Deserializer::from_str(trimmed).into_iter::<CostRecord>();
+                    for value in stream {
+                        match value {
+                            Ok(record) => {
+                                on_record(record);
+                                recovered += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if recovered == 0 {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        &format!(
-                            "Skipping malformed cost record at {}:{}: {error}",
-                            self.path.display().to_string(),
-                            line_number + 1
-                        )
-                    );
+                            &format!(
+                                "Skipping malformed cost record at {}:{}: {error}",
+                                self.path.display().to_string(),
+                                line_number + 1
+                            )
+                        );
+                    }
                 }
             }
         }
@@ -626,7 +648,15 @@ impl CostStorage {
                 )
             })?;
 
-        writeln!(file, "{}", serde_json::to_string(&record)?).with_context(|| {
+        // Build the full line (record + newline) and emit it with a SINGLE
+        // `write_all`. `writeln!` can lower to multiple `write` syscalls (one for
+        // the body, one for the newline); under concurrent appenders that
+        // interleaves and produces concatenated JSON like `{..}{..}` on one
+        // line. One `write_all` on an O_APPEND fd keeps each record's bytes
+        // contiguous, so the reader always sees one record per line.
+        let mut line = serde_json::to_string(&record)?;
+        line.push('\n');
+        file.write_all(line.as_bytes()).with_context(|| {
             format!(
                 "Failed to write cost record to {}",
                 self.path.display().to_string()
