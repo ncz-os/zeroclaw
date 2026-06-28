@@ -1,0 +1,17 @@
+{
+  "model_id_raw": "sakana/fugu-ultra",
+  "raw": {
+    "prompt": "0.000005",
+    "completion": "0.00003",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000005"
+  },
+  "expected": {
+    "model_id": "fugu-ultra",
+    "input": 5.0,
+    "output": 30.0,
+    "cache_read": 0.5,
+    "cache_write": null,
+    "source": "openrouter"
+  }
+}

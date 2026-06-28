@@ -1,0 +1,51 @@
+[
+  {
+    "raw": "openai/gpt-4o",
+    "expected": {
+      "provider": "openai",
+      "model_id": "gpt-4o"
+    }
+  },
+  {
+    "raw": "GPT-4O",
+    "expected": {
+      "provider": null,
+      "model_id": "gpt-4o"
+    }
+  },
+  {
+    "raw": "~anthropic/claude-fable-latest",
+    "expected": {
+      "provider": "anthropic",
+      "model_id": "claude-fable-latest"
+    }
+  },
+  {
+    "raw": "amazon.nova-2-lite-v1:0",
+    "expected": {
+      "provider": null,
+      "model_id": "amazon.nova-2-lite-v1:0"
+    }
+  },
+  {
+    "raw": "anthropic.claude-haiku-4-5-20251001-v1:0",
+    "expected": {
+      "provider": null,
+      "model_id": "anthropic.claude-haiku-4-5-20251001-v1:0"
+    }
+  },
+  {
+    "raw": "nvidia/llama-3.3-70b-instruct",
+    "expected": {
+      "provider": "nvidia",
+      "model_id": "llama-3.3-70b-instruct"
+    }
+  },
+  {
+    "raw": "some-unknown/weird-model",
+    "expected": {
+      "provider": "some-unknown",
+      "model_id": "weird-model"
+    }
+  }
+]

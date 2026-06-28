@@ -187,6 +187,48 @@ Branch/commit/PR rules:
 - Follow `.github/pull_request_template.md` fully.
 - Never commit secrets, personal data, or real identity information (see `@docs/book/src/contributing/privacy.md`).
 
+## Pre-PR Preflight Gate
+
+**Mandatory for automated / agentic contributors — run before opening any PR.**
+
+```bash
+scripts/agent-preflight.sh "fix(scope): your conventional-commit title"
+```
+
+Idempotent (auto-applies `rustfmt`; everything else is read-only). It provides
+high-fidelity local parity for CI's fmt, clippy, check, and test gates by using
+the same flags. A green preflight is strong evidence, but not an absolute CI
+guarantee because local toolchains, system packages, caches, and runner
+platforms can still differ:
+
+1. `cargo fmt --all` then `--check` — CI's `Format` job gates everything; an
+   unformatted branch skips all other checks and fails `CI Required Gate`.
+2. `scripts/ci/rust_quality_gate.sh --strict` — clippy `-D warnings` plus the
+   provider-dispatch SSOT gate.
+2b. `cargo clippy --workspace --exclude zeroclaw-desktop --all-targets --features ci-all -- -D warnings`
+   — mirrors CI's `Lint` job curated feature set.
+3. `cargo check --locked --features ci-all` and
+   `cargo check --locked --no-default-features` — mirror CI's `Check` matrix.
+4. `cargo nextest run --locked --workspace --exclude zeroclaw-desktop` — mirrors
+   CI's `Test` job; if `cargo-nextest` is unavailable locally, preflight falls
+   back to `cargo test --locked --workspace --exclude zeroclaw-desktop`.
+4b. `cargo test --test architecture tests_that_persist_config_isolate_the_path`
+   and `cargo test --test architecture user_facing_strings_route_through_fluent`
+   — mirror CI's architecture guards.
+5. `scripts/check-pr-title.sh "<title>"` — the `main` check requires Conventional
+   Commits **with a scope** (`type(scope): description`); `[Bug]:` / `[Tracker]:`
+   / `[Feature]:` titles are rejected.
+
+A non-zero exit is a hard gate: fix and re-run before pushing — do not open a PR
+on red. Pipelines must additionally:
+
+- **Dedupe by issue** — before opening a PR, check for an existing open PR that
+  references the target issue; if one exists, push to its branch instead of
+  opening a second (competing PRs cannot both merge).
+- **Use the human author identity** with no AI-attribution footers (see the PR
+  template and the privacy contract).
+- **Rate-limit** PRs per repo per run to avoid flooding review and CI.
+
 ## Anti-Patterns
 
 - Do not add heavy dependencies for minor convenience.

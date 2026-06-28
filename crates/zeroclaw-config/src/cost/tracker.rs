@@ -235,6 +235,42 @@ impl CostTracker {
         })
     }
 
+    /// Cost summary for a single agent within an optional `[from, to)` window.
+    /// Mirrors [`Self::get_summary_in_bounds`] but also filters to records
+    /// attributed to `agent_alias`, so a caller attributing ONE agentic turn
+    /// (window + agent) gets that turn's spend instead of the agent's
+    /// daemon-lifetime total.
+    pub fn get_summary_in_bounds_for_agent(
+        &self,
+        agent_alias: &str,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<CostSummary> {
+        let (daily_cost, monthly_cost, records) = {
+            let mut storage = self.lock_storage();
+            let (d, m) = storage.get_aggregated_costs()?;
+            let recs: Vec<CostRecord> = storage
+                .records_in_bounds(from, to)?
+                .into_iter()
+                .filter(|r| r.agent_alias.as_deref() == Some(agent_alias))
+                .collect();
+            (d, m, recs)
+        };
+        let total_cost: f64 = records.iter().map(|r| r.usage.cost_usd).sum();
+        let total_tokens: u64 = records.iter().map(|r| r.usage.total_tokens).sum();
+        let request_count = records.len();
+        let by_model = build_model_stats(records.iter());
+        Ok(CostSummary {
+            session_cost_usd: total_cost,
+            daily_cost_usd: daily_cost,
+            monthly_cost_usd: monthly_cost,
+            total_tokens,
+            request_count,
+            by_model,
+            by_agent: HashMap::new(),
+        })
+    }
+
     /// Get the current cost summary scoped to a single agent alias. The
     /// session/day/month figures and `by_model` are filtered to records
     /// attributed to that alias; `by_agent` is left empty since the
@@ -558,16 +594,38 @@ impl CostStorage {
             match serde_json::from_str::<CostRecord>(trimmed) {
                 Ok(record) => on_record(record),
                 Err(error) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    // A single line that fails to parse may be two or more
+                    // records concatenated without a newline (a legacy
+                    // interleaved-write artifact from before the atomic-append
+                    // fix). Try to stream multiple records out of it before
+                    // giving up, so old corrupted ledgers still aggregate fully.
+                    let mut recovered = 0usize;
+                    let stream =
+                        serde_json::Deserializer::from_str(trimmed).into_iter::<CostRecord>();
+                    for value in stream {
+                        match value {
+                            Ok(record) => {
+                                on_record(record);
+                                recovered += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if recovered == 0 {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        &format!(
-                            "Skipping malformed cost record at {}:{}: {error}",
-                            self.path.display().to_string(),
-                            line_number + 1
-                        )
-                    );
+                            &format!(
+                                "Skipping malformed cost record at {}:{}: {error}",
+                                self.path.display().to_string(),
+                                line_number + 1
+                            )
+                        );
+                    }
                 }
             }
         }
@@ -626,7 +684,15 @@ impl CostStorage {
                 )
             })?;
 
-        writeln!(file, "{}", serde_json::to_string(&record)?).with_context(|| {
+        // Build the full line (record + newline) and emit it with a SINGLE
+        // `write_all`. `writeln!` can lower to multiple `write` syscalls (one for
+        // the body, one for the newline); under concurrent appenders that
+        // interleaves and produces concatenated JSON like `{..}{..}` on one
+        // line. One `write_all` on an O_APPEND fd keeps each record's bytes
+        // contiguous, so the reader always sees one record per line.
+        let mut line = serde_json::to_string(&record)?;
+        line.push('\n');
+        file.write_all(line.as_bytes()).with_context(|| {
             format!(
                 "Failed to write cost record to {}",
                 self.path.display().to_string()
@@ -733,6 +799,44 @@ mod tests {
             enabled: true,
             ..Default::default()
         }
+    }
+
+    /// Regression: a legacy ledger whose records were concatenated onto a
+    /// single line (the pre-atomic-append interleave bug) must still have all
+    /// of its records recovered by `for_each_record`, so historical cost data
+    /// keeps aggregating.
+    #[test]
+    fn recovers_concatenated_records_from_legacy_ledger() {
+        let tmp = TempDir::new().unwrap();
+        // Write two real, valid records through the normal (now-atomic) path.
+        let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
+        tracker
+            .record_usage(TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0, 0.0))
+            .unwrap();
+        tracker
+            .record_usage(TokenUsage::new("test/model", 2000, 800, 0, 1.0, 2.0, 0.0))
+            .unwrap();
+
+        // Simulate the legacy interleaved-write artifact: collapse the two
+        // newline-separated records into one concatenated `{..}{..}` line.
+        let path = resolve_storage_path(tmp.path()).unwrap();
+        let joined: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>()
+            .join("");
+        std::fs::write(&path, format!("{joined}\n")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            1,
+            "ledger should now be a single concatenated line"
+        );
+
+        // A fresh storage over the corrupted ledger still recovers both records.
+        let storage = CostStorage::new(&path).unwrap();
+        let mut count = 0usize;
+        storage.for_each_record(|_| count += 1).unwrap();
+        assert_eq!(count, 2, "both concatenated records should be recovered");
     }
 
     #[test]

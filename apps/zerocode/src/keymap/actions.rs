@@ -127,8 +127,24 @@ keyactions! {
         PaneNavLeft  [Chord::with(KeyCode::Left, KeyModifiers::ALT), Chord::with(KeyCode::Char('b'), KeyModifiers::ALT)]  => "prev pane",
         PaneNavRight [Chord::with(KeyCode::Right, KeyModifiers::ALT), Chord::with(KeyCode::Char('f'), KeyModifiers::ALT)] => "next pane",
         ReloadDaemon [Chord::ctrl('r')]                                 => "reload daemon",
+        ThemePicker  [Chord::ctrl('y')]                                 => "theme picker",
         ConfirmYes   []                                                 => "confirm",
         ConfirmNo    []                                                 => "cancel",
+    }
+}
+
+keyactions! {
+    // Shared navigation/refresh actions for pluggable panels (ReportPanel,
+    // ThemePanel, and future panels). Panels route keys through this enum
+    // instead of reading `key.code`, so panel scrolling stays remappable
+    // and passes the no-hardcoded-chords guard.
+    pub enum PanelAction ("panel") {
+        Refresh    [Chord::char('r')]                            => "refresh",
+        ScrollUp   [Chord::key(KeyCode::Up), Chord::char('k')]   => "scroll up",
+        ScrollDown [Chord::key(KeyCode::Down), Chord::char('j')] => "scroll down",
+        PageUp     [Chord::key(KeyCode::PageUp)]                 => "page up",
+        PageDown   [Chord::key(KeyCode::PageDown)]               => "page down",
+        Top        [Chord::key(KeyCode::Home)]                   => "jump to top",
     }
 }
 

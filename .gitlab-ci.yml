@@ -1,0 +1,74 @@
+# GitLab quality gate for the ncz-os/zeroclaw fork.
+#
+# The canonical GitHub gate (.github/workflows/ci.yml, inherited from upstream
+# zeroclaw-labs) runs the full 3-OS matrix on the GitHub mirror. gitlab.com is
+# the fork's canonical home but has no upstream GitLab CI, so this file fills the
+# gap with the comprehensive *linux* subset of that gate — the same commands the
+# ncz-os ci-sim runs (fmt / clippy ci-all -D warnings / arch guards / check
+# all-features + no-default / nextest / cargo-deny). gitlab.com shared runners are
+# linux-only; mac/windows coverage stays on the GitHub matrix. CI is free under
+# the ncz-os OSS license. Toolchain pinned to 1.93.0 (matches upstream CI).
+#
+# Lives on the `zoder-integration` patch stack (see docs/VENDORING.md), so it
+# validates our integration branch and MRs without diverging the mirrored master.
+
+default:
+  image: rust:1.93.0
+  cache:
+    key:
+      files: [Cargo.lock]
+    paths: [.cargo/, target/]
+  before_script:
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - mkdir -p "$CARGO_HOME/bin"
+    - apt-get update -qq && apt-get install -y -qq libudev-dev mold clang pkg-config
+    - mkdir -p web/dist && touch web/dist/.gitkeep
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+stages: [check, test, security]
+
+fmt:
+  stage: check
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+
+clippy:
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --workspace --exclude zeroclaw-desktop --all-targets --features ci-all -- -D warnings
+
+arch-guards:
+  stage: check
+  script:
+    - cargo test --test architecture tests_that_persist_config_isolate_the_path
+    - cargo test --test architecture user_facing_strings_route_through_fluent
+
+check:
+  stage: check
+  script:
+    - cargo check --locked --features ci-all --all-targets
+    - cargo check --locked --no-default-features
+
+test:
+  stage: test
+  script:
+    - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"
+    - cargo nextest run --locked --workspace --exclude zeroclaw-desktop
+  variables:
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+security:
+  stage: security
+  script:
+    - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+    - cargo binstall -y cargo-deny
+    - cargo deny check
+    - cargo fetch --locked

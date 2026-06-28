@@ -1,0 +1,41 @@
+[
+  {
+    "price": {
+      "input": 2.5,
+      "output": 10.0,
+      "cache_read": 0.25,
+      "cache_write": 3.0
+    },
+    "tokens_in": 1000000,
+    "tokens_out": 1000000,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "expected_cost": 12.5
+  },
+  {
+    "price": {
+      "input": 2.5,
+      "output": 10.0,
+      "cache_read": 0.25,
+      "cache_write": 3.0
+    },
+    "tokens_in": 500000,
+    "tokens_out": 250000,
+    "cache_read_tokens": 400000,
+    "cache_write_tokens": 100000,
+    "expected_cost": 4.15
+  },
+  {
+    "price": {
+      "input": 2.5,
+      "output": 10.0,
+      "cache_read": 0.25,
+      "cache_write": 3.0
+    },
+    "tokens_in": 0,
+    "tokens_out": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "expected_cost": 0.0
+  }
+]

@@ -1094,9 +1094,7 @@ pub fn all_tools_with_runtime(
     // write to (they build the backend under `&config.data_dir`), NOT the
     // per-agent `workspace_dir` — otherwise `sessions_list`/`sessions_history`
     // miss real sessions and a stray `sessions/sessions.db` is created per agent.
-    if let Ok(backend) =
-        zeroclaw_infra::make_session_backend(&config.data_dir, &config.channels.session_backend)
-    {
+    if let Ok(backend) = zeroclaw_infra::make_session_backend(&config.data_dir, &config.channels) {
         tool_arcs.push(Arc::new(SessionsCurrentTool::new(backend.clone())));
         tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
         tool_arcs.push(Arc::new(SessionsHistoryTool::new(

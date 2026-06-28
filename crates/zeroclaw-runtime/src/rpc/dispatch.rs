@@ -101,6 +101,7 @@ pub enum Method {
 
     // Cost
     CostQuery,
+    CostOrg,
 
     // Skills
     SkillsBundles,
@@ -202,6 +203,7 @@ impl Method {
         (Method::AgentsStatus, "agents/status"),
         // Cost
         (Method::CostQuery, "cost/query"),
+        (Method::CostOrg, "cost/org"),
         // Skills
         (Method::SkillsBundles, "skills/bundles"),
         (Method::SkillsList, "skills/list"),
@@ -478,10 +480,18 @@ impl RpcDispatcher {
         {
             return true;
         }
-        if let Some(backend) = self.ctx.session_backend.as_ref()
-            && backend.count_agent_attribution(from).unwrap_or(0) > 0
-        {
-            return true;
+        if let Some(backend) = self.ctx.session_backend.as_ref() {
+            let backend = Arc::clone(backend);
+            let from = from.to_string();
+            if tokio::task::spawn_blocking(move || backend.count_agent_attribution(&from))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(0)
+                > 0
+            {
+                return true;
+            }
         }
         false
     }
@@ -622,6 +632,7 @@ impl RpcDispatcher {
 
             // Cost
             Method::CostQuery => self.handle_cost_query(&req.params),
+            Method::CostOrg => self.handle_cost_org(),
 
             // Skills
             Method::SkillsBundles => self.handle_skills_bundles(),
@@ -752,12 +763,14 @@ impl RpcDispatcher {
         let ids = self.ctx.sessions.list_ids().await;
         // Count persisted sessions (channel-originated) that aren't already
         // in the in-memory RPC store.
-        let persisted_count = self
-            .ctx
-            .session_backend
-            .as_ref()
-            .map(|b| b.list_sessions_with_metadata().len())
-            .unwrap_or(0);
+        let persisted_count = if let Some(backend) = self.ctx.session_backend.as_ref() {
+            let backend = Arc::clone(backend);
+            tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata().len())
+                .await
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let total = ids.len().max(persisted_count);
         to_result(StatusResult {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1054,8 +1067,14 @@ impl RpcDispatcher {
             crate::rpc::types::ChatMode::Chat => {
                 if let Some(ref backend) = self.ctx.session_backend {
                     let session_key = format!("rpc_{session_id}");
-                    let _ = backend.set_session_agent_alias(&session_key, &req.agent_alias);
-                    let stored = backend.load(&session_key);
+                    let backend = Arc::clone(backend);
+                    let agent_alias = req.agent_alias.clone();
+                    let stored = tokio::task::spawn_blocking(move || {
+                        let _ = backend.set_session_agent_alias(&session_key, &agent_alias);
+                        backend.load(&session_key)
+                    })
+                    .await
+                    .unwrap_or_default();
                     if !stored.is_empty() {
                         self.ctx.sessions.seed_history(&session_id, &stored).await;
                         message_count = stored.len();
@@ -1685,19 +1704,25 @@ impl RpcDispatcher {
             }
             crate::rpc::types::ChatMode::Chat => {
                 if let Some(ref backend) = self.ctx.session_backend {
+                    let backend = Arc::clone(backend);
                     let key = format!("rpc_{sid}");
-                    let _ = backend.append(&key, &ChatMessage::user(&prompt));
-                    match &outcome {
-                        Ok(TurnOutcome::Completed { text, .. }) => {
-                            let _ = backend.append(&key, &ChatMessage::assistant(text));
-                        }
+                    let prompt = prompt.clone();
+                    let assistant_text = match &outcome {
+                        Ok(TurnOutcome::Completed { text, .. }) => Some(text.clone()),
                         Ok(TurnOutcome::Cancelled { partial_text, .. })
                             if !partial_text.is_empty() =>
                         {
-                            let _ = backend.append(&key, &ChatMessage::assistant(partial_text));
+                            Some(partial_text.clone())
                         }
-                        _ => {}
-                    }
+                        _ => None,
+                    };
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = backend.append(&key, &ChatMessage::user(&prompt));
+                        if let Some(text) = assistant_text {
+                            let _ = backend.append(&key, &ChatMessage::assistant(&text));
+                        }
+                    })
+                    .await;
                 }
             }
         }
@@ -1986,18 +2011,26 @@ impl RpcDispatcher {
         let config = self.ctx.config.read().clone();
 
         // Use FTS when a query is provided, plain list otherwise.
+        let backend = Arc::clone(backend);
         let all = if let Some(ref keyword) = req.query {
             if keyword.trim().is_empty() {
-                backend.list_sessions_with_metadata()
+                tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
+                    .await
+                    .unwrap_or_default()
             } else {
                 use zeroclaw_infra::session_backend::SessionQuery;
-                backend.search(&SessionQuery {
+                let query = SessionQuery {
                     keyword: Some(keyword.clone()),
                     limit: req.limit,
-                })
+                };
+                tokio::task::spawn_blocking(move || backend.search(&query))
+                    .await
+                    .unwrap_or_default()
             }
         } else {
-            backend.list_sessions_with_metadata()
+            tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
+                .await
+                .unwrap_or_default()
         };
 
         let sessions: Vec<SessionEntry> = all
@@ -2082,14 +2115,19 @@ impl RpcDispatcher {
             format!("rpc_{}", req.session_id),
             format!("gw_{}", req.session_id),
         ];
-        let mut raw: Vec<zeroclaw_api::model_provider::ChatMessage> = Vec::new();
-        for key in &candidates {
-            let loaded = backend.load(key);
-            if !loaded.is_empty() {
-                raw = loaded;
-                break;
-            }
-        }
+        let backend = Arc::clone(backend);
+        let mut raw: Vec<zeroclaw_api::model_provider::ChatMessage> =
+            tokio::task::spawn_blocking(move || {
+                for key in &candidates {
+                    let loaded = backend.load(key);
+                    if !loaded.is_empty() {
+                        return loaded;
+                    }
+                }
+                Vec::new()
+            })
+            .await
+            .unwrap_or_default();
 
         // Fallback: ACP sessions live in a dedicated store (`acp-sessions.db`)
         // and are keyed by their raw UUID — they will never be found in the
@@ -2229,13 +2267,18 @@ impl RpcDispatcher {
         self.ctx.sessions.remove(&req.session_id).await;
         // Remove from persistent backend — try raw id, then prefixed variants.
         if let Some(ref backend) = self.ctx.session_backend {
-            for key in &[
+            let backend = Arc::clone(backend);
+            let keys = [
                 req.session_id.clone(),
                 format!("rpc_{}", req.session_id),
                 format!("gw_{}", req.session_id),
-            ] {
-                let _ = backend.delete_session(key);
-            }
+            ];
+            let _ = tokio::task::spawn_blocking(move || {
+                for key in &keys {
+                    let _ = backend.delete_session(key);
+                }
+            })
+            .await;
         }
         to_result(SessionDeleteResult {
             session_id: req.session_id,
@@ -3044,7 +3087,12 @@ impl RpcDispatcher {
         let rpc_counts = self.ctx.sessions.count_by_agent().await;
         let mut backend_counts = std::collections::HashMap::<String, usize>::new();
         if let Some(ref backend) = self.ctx.session_backend {
-            for meta in backend.list_sessions_with_metadata() {
+            let backend = Arc::clone(backend);
+            let metadata =
+                tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
+                    .await
+                    .unwrap_or_default();
+            for meta in metadata {
                 let alias = meta.agent_alias.or_else(|| {
                     meta.channel_id
                         .as_deref()
@@ -3084,9 +3132,32 @@ impl RpcDispatcher {
             .as_ref()
             .ok_or_else(|| rpc_err(INTERNAL_ERROR, "Cost tracking is not available"))?;
         let req: CostQueryParams = parse_params(params)?;
+        // Optional `[from, to)` window (RFC3339). Lets callers (the dashboard's
+        // Reports view, or an external CLI report) pull day/month/quarter/YTD
+        // scalars rather than only the daemon's today/this-month aggregates.
+        let parse_bound = |raw: &str| -> Result<chrono::DateTime<chrono::Utc>, _> {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rpc_err(INVALID_PARAMS, format!("invalid date {raw:?}: {e}")))
+        };
+        let from = req.from.as_deref().map(parse_bound).transpose()?;
+        let to = req.to.as_deref().map(parse_bound).transpose()?;
         let summary = if let Some(agent) = req.agent {
+            // When BOTH an agent and a window are given, scope to that agent's
+            // spend WITHIN the window (e.g. attributing one agentic turn) — not
+            // the agent's daemon-lifetime total, which would inflate every run.
+            if from.is_some() || to.is_some() {
+                tracker
+                    .get_summary_in_bounds_for_agent(&agent, from, to)
+                    .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
+            } else {
+                tracker
+                    .get_summary_for_agent(&agent)
+                    .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
+            }
+        } else if from.is_some() || to.is_some() {
             tracker
-                .get_summary_for_agent(&agent)
+                .get_summary_in_bounds(from, to)
                 .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
         } else {
             tracker
@@ -3094,6 +3165,29 @@ impl RpcDispatcher {
                 .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
         };
         to_result(summary)
+    }
+
+    /// Optional organization-level cost snapshot, read from
+    /// `<data_dir>/org_cost.json` if present. Vendor-neutral and
+    /// presence-gated: an integrator's `sync` can write this file from an
+    /// upstream billing source so the dashboard can show org + personal
+    /// billed totals; a vanilla build never writes it, so this returns `null`
+    /// and the dashboard simply omits the organization row. The file is
+    /// returned verbatim (the daemon does not interpret its shape).
+    fn handle_cost_org(&self) -> RpcResult {
+        let path = self.ctx.config.read().data_dir.join("org_cost.json");
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => {
+                let value: Value = serde_json::from_str(&raw).map_err(|e| {
+                    rpc_err(
+                        INTERNAL_ERROR,
+                        format!("org_cost.json is not valid JSON: {e}"),
+                    )
+                })?;
+                Ok(value)
+            }
+            Err(_) => Ok(Value::Null),
+        }
     }
 
     // ── Skills handlers ──────────────────────────────────────────
