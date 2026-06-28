@@ -1357,6 +1357,10 @@ impl Chat {
                 let item_count = state.model_picker.item_count();
                 if let Some(idx) = mouse::list_click_index(row, modal_rect, 0, item_count) {
                     if let Some(picker) = state.model_picker.picker_mut() {
+                        // Ignore clicks on non-selectable section headers.
+                        if !picker.selectable.get(idx).copied().unwrap_or(true) {
+                            return;
+                        }
                         picker.cursor = idx;
                     }
                     Self::confirm_model_picker_selection(rpc, state).await;
@@ -1503,10 +1507,8 @@ impl Chat {
                 Some(m) => Some(m),
                 None => Self::configured_model(rpc, &model_provider_ref).await,
             };
-            state.model_picker = ModelPickerOverlay::Model(crate::widgets::PickerState::new(
-                models,
-                current.as_deref(),
-            ));
+            state.model_picker =
+                ModelPickerOverlay::Model(build_model_picker(models, current.as_deref()));
             state.info_message = None;
             state.mark_dirty_full();
             return;
@@ -1569,10 +1571,8 @@ impl Chat {
         state
             .input_bar
             .set_model_catalog(res.family, res.models.clone());
-        state.model_picker = ModelPickerOverlay::Model(crate::widgets::PickerState::new(
-            res.models,
-            res.current.as_deref(),
-        ));
+        state.model_picker =
+            ModelPickerOverlay::Model(build_model_picker(res.models, res.current.as_deref()));
         let _ = res.model_provider_ref;
         state.info_message = None;
         state.mark_dirty_full();
@@ -2418,6 +2418,7 @@ fn render(f: &mut Frame, state: &mut ChatState, area: Rect) {
                 &picker.items,
                 picker.cursor,
             )
+            .with_selectable(&picker.selectable)
             .render(f, area);
         }
         ModelPickerOverlay::ConfiguredProviderStage(picker) => {
@@ -2432,6 +2433,124 @@ fn render(f: &mut Frame, state: &mut ChatState, area: Rect) {
     }
 
     state.input_bar.render_explorer_overlay(f, area);
+}
+
+/// Free/paid classification for the model picker's sections.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelTier {
+    Free,
+    Paid,
+    Unknown,
+}
+
+/// Load the nvzoder model corpus (`~/.nvzoder/model_corpus.json`) into a lookup
+/// from model identifier forms (full id, host-stripped tail, and leaf) to
+/// whether the model is free. Returns an empty map when the corpus is absent or
+/// unreadable, which makes the picker fall back to a flat, ungrouped layout.
+fn load_corpus_free_map() -> std::collections::HashMap<String, bool> {
+    let mut map = std::collections::HashMap::new();
+    let Some(home) = std::env::var_os("HOME") else {
+        return map;
+    };
+    let path = std::path::Path::new(&home).join(".nvzoder/model_corpus.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return map;
+    };
+    // The corpus is a JSON object keyed by model id; each value carries `free`,
+    // `leaf`, and `id`. Index by leaf and the host-stripped id tail so live
+    // catalog names (which may carry a different host prefix, e.g. `nvidia/...`
+    // vs the corpus `nvcf/...`) still match.
+    let Some(obj) = value.as_object() else {
+        return map;
+    };
+    for entry in obj.values() {
+        let Some(free) = entry.get("free").and_then(serde_json::Value::as_bool) else {
+            continue;
+        };
+        if let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) {
+            map.entry(id.to_string()).or_insert(free);
+            if let Some((_, tail)) = id.split_once('/') {
+                map.entry(tail.to_string()).or_insert(free);
+            }
+        }
+        if let Some(leaf) = entry.get("leaf").and_then(serde_json::Value::as_str) {
+            map.entry(leaf.to_string()).or_insert(free);
+        }
+    }
+    map
+}
+
+/// Classify a live catalog model id against the corpus free-map, trying the
+/// full id, then the host-stripped tail, then the leaf segment.
+fn classify_model_tier(
+    model_id: &str,
+    free_map: &std::collections::HashMap<String, bool>,
+) -> ModelTier {
+    let leaf = model_id.rsplit('/').next().unwrap_or(model_id);
+    let tail = model_id.split_once('/').map(|(_, t)| t);
+    let found = free_map
+        .get(model_id)
+        .or_else(|| tail.and_then(|t| free_map.get(t)))
+        .or_else(|| free_map.get(leaf));
+    match found {
+        Some(true) => ModelTier::Free,
+        Some(false) => ModelTier::Paid,
+        None => ModelTier::Unknown,
+    }
+}
+
+/// Build the model picker, grouping rows into Free / Paid / Unclassified
+/// sections (with dim, non-selectable headers) using the nvzoder corpus. Falls
+/// back to a flat picker when the corpus is unavailable or matches nothing,
+/// preserving the stock behaviour.
+fn build_model_picker(models: Vec<String>, current: Option<&str>) -> crate::widgets::PickerState {
+    let free_map = load_corpus_free_map();
+    if free_map.is_empty() {
+        return crate::widgets::PickerState::new(models, current);
+    }
+
+    let mut free = Vec::new();
+    let mut paid = Vec::new();
+    let mut unknown = Vec::new();
+    for m in models {
+        match classify_model_tier(&m, &free_map) {
+            ModelTier::Free => free.push(m),
+            ModelTier::Paid => paid.push(m),
+            ModelTier::Unknown => unknown.push(m),
+        }
+    }
+
+    // Nothing matched the corpus — keep the flat layout rather than dumping
+    // everything under one "Unclassified" header.
+    if free.is_empty() && paid.is_empty() {
+        return crate::widgets::PickerState::new(unknown, current);
+    }
+
+    let sections = [
+        (format!("\u{2500}\u{2500} Free ({}) \u{2500}\u{2500}", free.len()), free),
+        (format!("\u{2500}\u{2500} Paid ({}) \u{2500}\u{2500}", paid.len()), paid),
+        (
+            format!("\u{2500}\u{2500} Unclassified ({}) \u{2500}\u{2500}", unknown.len()),
+            unknown,
+        ),
+    ];
+    let mut items = Vec::new();
+    let mut selectable = Vec::new();
+    for (label, rows) in sections {
+        if rows.is_empty() {
+            continue;
+        }
+        items.push(label);
+        selectable.push(false);
+        for r in rows {
+            items.push(r);
+            selectable.push(true);
+        }
+    }
+    crate::widgets::PickerState::new_grouped(items, selectable, current)
 }
 
 fn model_picker_overlay_area(model_picker: &ModelPickerOverlay, area: Rect) -> Option<Rect> {

@@ -798,6 +798,10 @@ pub struct ModelProviderConfig {
     #[tab(Model)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Per-read SSE idle timeout in seconds for streaming responses. A stalled upstream (socket open but no bytes) is aborted with a retryable error instead of hanging the turn. Leave unset to use the built-in default (90s) or the family default. Raise it for reasoning-heavy models on aggregators that can pause longer than 90s between tokens (e.g. DeepSeek-R1, MiniMax reasoning).
+    #[tab(Model)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse_idle_timeout_secs: Option<u64>,
     /// Extra HTTP headers sent with every request. Niche: used for auth bridges, corporate proxies, or custom gateways that demand a tracing header. Most users never touch this; edit `config.toml` directly if you need it.
     #[tab(Connection)]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

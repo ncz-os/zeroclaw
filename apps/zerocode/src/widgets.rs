@@ -319,6 +319,9 @@ pub struct PickerModal<'a> {
     title: &'a str,
     items: &'a [String],
     cursor: usize,
+    /// Optional per-row selectability, parallel to `items`. Rows marked `false`
+    /// render as dim section headers rather than selectable entries.
+    selectable: Option<&'a [bool]>,
 }
 
 impl<'a> PickerModal<'a> {
@@ -327,7 +330,15 @@ impl<'a> PickerModal<'a> {
             title,
             items,
             cursor,
+            selectable: None,
         }
+    }
+
+    /// Attach a selectability mask so non-selectable rows render as dim
+    /// section headers.
+    pub fn with_selectable(mut self, selectable: &'a [bool]) -> Self {
+        self.selectable = Some(selectable);
+        self
     }
 
     pub fn area_for(title: &str, items: &[String], area: Rect) -> Option<Rect> {
@@ -374,7 +385,12 @@ impl<'a> PickerModal<'a> {
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let style = if i == self.cursor {
+                let is_header = self
+                    .selectable
+                    .is_some_and(|mask| !mask.get(i).copied().unwrap_or(true));
+                let style = if is_header {
+                    crate::theme::dim_style()
+                } else if i == self.cursor {
                     crate::theme::selected_style()
                 } else {
                     crate::theme::body_style()
@@ -400,35 +416,85 @@ impl<'a> PickerModal<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct PickerState {
     pub items: Vec<String>,
+    /// Per-row selectability, parallel to `items`. A `false` entry marks row
+    /// `i` as a non-selectable section header (e.g. a "Free"/"Paid" divider)
+    /// that the cursor skips over. Always the same length as `items`.
+    pub selectable: Vec<bool>,
     pub cursor: usize,
 }
 
 impl PickerState {
-    /// Build a picker over `items`, pre-selecting `default` when present (else
-    /// the first row).
+    /// Build a flat picker over `items` where every row is selectable,
+    /// pre-selecting `default` when present (else the first row).
     pub fn new(items: Vec<String>, default: Option<&str>) -> Self {
+        let selectable = vec![true; items.len()];
         let cursor = default
             .and_then(|d| items.iter().position(|i| i == d))
             .unwrap_or(0);
-        Self { items, cursor }
+        Self {
+            items,
+            selectable,
+            cursor,
+        }
+    }
+
+    /// Build a sectioned picker. `selectable[i] == false` marks row `i` as a
+    /// non-selectable header; the cursor starts on (and movement keeps to)
+    /// selectable rows. `default` pre-selects a matching selectable row.
+    pub fn new_grouped(items: Vec<String>, selectable: Vec<bool>, default: Option<&str>) -> Self {
+        debug_assert_eq!(items.len(), selectable.len());
+        let first_selectable = selectable.iter().position(|s| *s).unwrap_or(0);
+        let cursor = default
+            .and_then(|d| {
+                items
+                    .iter()
+                    .zip(selectable.iter())
+                    .position(|(i, sel)| *sel && i == d)
+            })
+            .unwrap_or(first_selectable);
+        Self {
+            items,
+            selectable,
+            cursor,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    pub fn move_up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+    fn is_selectable(&self, idx: usize) -> bool {
+        self.selectable.get(idx).copied().unwrap_or(true)
     }
 
-    pub fn move_down(&mut self) {
-        if self.cursor + 1 < self.items.len() {
-            self.cursor += 1;
+    pub fn move_up(&mut self) {
+        let mut i = self.cursor;
+        while i > 0 {
+            i -= 1;
+            if self.is_selectable(i) {
+                self.cursor = i;
+                return;
+            }
         }
     }
 
-    /// The currently highlighted value, if any.
+    pub fn move_down(&mut self) {
+        let mut i = self.cursor;
+        while i + 1 < self.items.len() {
+            i += 1;
+            if self.is_selectable(i) {
+                self.cursor = i;
+                return;
+            }
+        }
+    }
+
+    /// The currently highlighted value, or `None` when the cursor rests on a
+    /// non-selectable header row.
     pub fn selected(&self) -> Option<&str> {
+        if !self.is_selectable(self.cursor) {
+            return None;
+        }
         self.items.get(self.cursor).map(String::as_str)
     }
 }

@@ -18,6 +18,11 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Per-read idle bound for SSE streams. A stalled upstream (socket open, no
+/// bytes) is converted into a retryable `StreamError` instead of hanging the
+/// agent turn forever. Mirrors `anthropic::SSE_IDLE_TIMEOUT`.
+const SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// A model_provider that speaks the OpenAI-compatible chat completions API.
 /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
 /// Synthetic, `OpenCode` Zen, `OpenCode` Go, `Z.AI`, `GLM`, `MiniMax`, Bedrock, Qianfan, Groq, Mistral, `xAI`, etc.
@@ -46,6 +51,13 @@ pub struct OpenAiCompatibleModelProvider {
     native_tool_calling: bool,
     /// HTTP request timeout in seconds for LLM API calls. Default: 120.
     timeout_secs: u64,
+    /// Per-read SSE idle bound in seconds for streaming responses. A stalled
+    /// upstream (socket open, no bytes) is converted into a retryable error
+    /// instead of hanging the agent turn. Default: 90. Raised by the factory for
+    /// reasoning-heavy families that legitimately pause >90s between tokens, and
+    /// overridable via `[providers.models.<alias>] sse_idle_timeout_secs` or the
+    /// `ZEROCLAW_SSE_IDLE_TIMEOUT_SECS` env var (per-invocation escape hatch).
+    sse_idle_timeout_secs: u64,
     /// Extra HTTP headers to include in all API requests.
     extra_headers: std::collections::HashMap<String, String>,
     /// Optional reasoning effort for GPT-5/Codex-compatible backends.
@@ -330,6 +342,7 @@ impl OpenAiCompatibleModelProvider {
             merge_system_into_user,
             native_tool_calling: !merge_system_into_user,
             timeout_secs: 120,
+            sse_idle_timeout_secs: SSE_IDLE_TIMEOUT.as_secs(),
             extra_headers: std::collections::HashMap::new(),
             reasoning_effort: None,
             replay_assistant_reasoning: true,
@@ -433,6 +446,28 @@ impl OpenAiCompatibleModelProvider {
     pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
         self
+    }
+
+    /// Override the per-read SSE idle timeout (seconds) for streaming responses.
+    /// A zero value is ignored so callers can pass through unset config safely.
+    pub fn with_sse_idle_timeout_secs(mut self, secs: u64) -> Self {
+        if secs > 0 {
+            self.sse_idle_timeout_secs = secs;
+        }
+        self
+    }
+
+    /// Resolve the effective SSE idle bound. The `ZEROCLAW_SSE_IDLE_TIMEOUT_SECS`
+    /// env override wins (per-invocation / ops escape hatch); otherwise the
+    /// configured or family-default value is used.
+    fn sse_idle_timeout(&self) -> std::time::Duration {
+        if let Ok(raw) = std::env::var("ZEROCLAW_SSE_IDLE_TIMEOUT_SECS")
+            && let Ok(secs) = raw.trim().parse::<u64>()
+            && secs > 0
+        {
+            return std::time::Duration::from_secs(secs);
+        }
+        std::time::Duration::from_secs(self.sse_idle_timeout_secs)
     }
 
     /// Set extra HTTP headers to include in all API requests.
@@ -1577,16 +1612,120 @@ fn parse_sse_line(line: &str) -> StreamResult<Option<StreamChunk>> {
     Ok(None)
 }
 
+/// Drive a raw SSE byte stream to text chunks, applying the per-read idle
+/// bound. Extracted from [`sse_bytes_to_chunks`] so the idle-timeout behavior
+/// is unit-testable with a synthetic stream (no live `reqwest::Response`).
+///
+/// Idempotency contract: on idle this returns WITHOUT sending `final_chunk`,
+/// so the consumer sees a retryable `StreamError::Http` rather than a false
+/// completion, and the agent's retry/fallback re-issues the call cleanly.
+async fn pump_sse_chunks<S, B>(
+    mut bytes_stream: S,
+    tx: tokio::sync::mpsc::Sender<StreamResult<StreamChunk>>,
+    count_tokens: bool,
+    idle_timeout: std::time::Duration,
+) where
+    S: futures_util::Stream<Item = reqwest::Result<B>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    let mut buffer = String::new();
+    // Accumulate partial UTF-8 sequences that may be split across
+    // HTTP/1.1 chunked transfer boundaries (e.g. 3-byte CJK chars).
+    let mut utf8_buf: Vec<u8> = Vec::new();
+
+    loop {
+        let item = match tokio::time::timeout(idle_timeout, bytes_stream.next()).await {
+            Ok(Some(item)) => item,
+            Ok(None) => break,
+            Err(_elapsed) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "idle_secs": idle_timeout.as_secs(),
+                        })),
+                    "stream: SSE idle timeout — connection stalled, aborting stream"
+                );
+                let _ = tx
+                    .send(Err(StreamError::Http(format!(
+                        "SSE stream stalled: no data for {}s",
+                        idle_timeout.as_secs()
+                    ))))
+                    .await;
+                return;
+            }
+        };
+        match item {
+            Ok(bytes) => {
+                utf8_buf.extend_from_slice(bytes.as_ref());
+                let text = match std::str::from_utf8(&utf8_buf) {
+                    Ok(s) => {
+                        let owned = s.to_string();
+                        utf8_buf.clear();
+                        owned
+                    }
+                    Err(e) => {
+                        let valid_up_to = e.valid_up_to();
+                        if valid_up_to == 0 && utf8_buf.len() < 4 {
+                            // Could still be an incomplete multi-byte char; wait for more data
+                            continue;
+                        }
+                        let valid = String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
+                        utf8_buf.drain(..valid_up_to);
+                        valid
+                    }
+                };
+                if text.is_empty() {
+                    continue;
+                }
+
+                buffer.push_str(&text);
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].to_string();
+                    buffer.drain(..=pos);
+
+                    match parse_sse_line(&line) {
+                        Ok(Some(chunk)) => {
+                            let chunk = if count_tokens {
+                                chunk.with_token_estimate()
+                            } else {
+                                chunk
+                            };
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                return; // Receiver dropped
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Err(StreamError::Http(super::format_error_chain(&e))))
+                    .await;
+                return;
+            }
+        }
+    }
+
+    let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
+}
+
 /// Convert SSE byte stream to text chunks.
 fn sse_bytes_to_chunks(
     response: reqwest::Response,
     count_tokens: bool,
+    idle_timeout: std::time::Duration,
 ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 
     let handle = ::zeroclaw_spawn::spawn!(async move {
-        let mut buffer = String::new();
-
         match response.error_for_status_ref() {
             Ok(_) => {}
             Err(e) => {
@@ -1597,72 +1736,7 @@ fn sse_bytes_to_chunks(
             }
         }
 
-        let mut bytes_stream = response.bytes_stream();
-        // Accumulate partial UTF-8 sequences that may be split across
-        // HTTP/1.1 chunked transfer boundaries (e.g. 3-byte CJK chars).
-        let mut utf8_buf: Vec<u8> = Vec::new();
-
-        while let Some(item) = bytes_stream.next().await {
-            match item {
-                Ok(bytes) => {
-                    utf8_buf.extend_from_slice(&bytes);
-                    let text = match std::str::from_utf8(&utf8_buf) {
-                        Ok(s) => {
-                            let owned = s.to_string();
-                            utf8_buf.clear();
-                            owned
-                        }
-                        Err(e) => {
-                            let valid_up_to = e.valid_up_to();
-                            if valid_up_to == 0 && utf8_buf.len() < 4 {
-                                // Could still be an incomplete multi-byte char; wait for more data
-                                continue;
-                            }
-                            let valid =
-                                String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
-                            utf8_buf.drain(..valid_up_to);
-                            valid
-                        }
-                    };
-                    if text.is_empty() {
-                        continue;
-                    }
-
-                    buffer.push_str(&text);
-
-                    while let Some(pos) = buffer.find('\n') {
-                        let line = buffer[..pos].to_string();
-                        buffer.drain(..=pos);
-
-                        match parse_sse_line(&line) {
-                            Ok(Some(chunk)) => {
-                                let chunk = if count_tokens {
-                                    chunk.with_token_estimate()
-                                } else {
-                                    chunk
-                                };
-                                if tx.send(Ok(chunk)).await.is_err() {
-                                    return; // Receiver dropped
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                let _ = tx.send(Err(e)).await;
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(StreamError::Http(super::format_error_chain(&e))))
-                        .await;
-                    return;
-                }
-            }
-        }
-
-        let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
+        pump_sse_chunks(response.bytes_stream(), tx, count_tokens, idle_timeout).await;
     });
 
     let guard = AbortOnDrop::new(handle.abort_handle());
@@ -1677,13 +1751,14 @@ pub(crate) fn sse_bytes_to_events(
     response: reqwest::Response,
     count_tokens: bool,
 ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
-    sse_bytes_to_events_for_contract(response, count_tokens, false)
+    sse_bytes_to_events_for_contract(response, count_tokens, false, SSE_IDLE_TIMEOUT)
 }
 
 fn sse_bytes_to_events_for_contract(
     response: reqwest::Response,
     count_tokens: bool,
     targets_mistral_tool_call_contract: bool,
+    idle_timeout: std::time::Duration,
 ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
@@ -1706,7 +1781,29 @@ fn sse_bytes_to_events_for_contract(
         let mut bytes_stream = response.bytes_stream();
         // Accumulate partial UTF-8 sequences split across chunk boundaries.
         let mut utf8_buf: Vec<u8> = Vec::new();
-        while let Some(item) = bytes_stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(idle_timeout, bytes_stream.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "idle_secs": idle_timeout.as_secs(),
+                            })),
+                        "stream: SSE idle timeout — connection stalled, aborting stream"
+                    );
+                    let _ = tx
+                        .send(Err(StreamError::Http(format!(
+                            "SSE stream stalled: no data for {}s",
+                            idle_timeout.as_secs()
+                        ))))
+                        .await;
+                    return;
+                }
+            };
             match item {
                 Ok(bytes) => {
                     utf8_buf.extend_from_slice(&bytes);
@@ -3116,6 +3213,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                 response,
                 count_tokens,
                 targets_mistral_tool_call_contract,
+                provider.sse_idle_timeout(),
             );
             while let Some(event) = event_stream.next().await {
                 if tx.send(event).await.is_err() {
@@ -3261,7 +3359,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             }
 
             // Convert to chunk stream and forward to channel
-            let mut chunk_stream = sse_bytes_to_chunks(response, count_tokens);
+            let mut chunk_stream = sse_bytes_to_chunks(response, count_tokens, provider.sse_idle_timeout());
             while let Some(chunk) = chunk_stream.next().await {
                 if tx.send(chunk).await.is_err() {
                     break; // Receiver dropped
@@ -3371,7 +3469,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                 return;
             }
 
-            let mut chunk_stream = sse_bytes_to_chunks(response, count_tokens);
+            let mut chunk_stream = sse_bytes_to_chunks(response, count_tokens, provider.sse_idle_timeout());
             while let Some(chunk) = chunk_stream.next().await {
                 if tx.send(chunk).await.is_err() {
                     break;
@@ -3415,6 +3513,69 @@ impl ::zeroclaw_api::attribution::Attributable for OpenAiCompatibleModelProvider
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream that yields one buffer then parks forever — models an SSE
+    /// connection that delivers a frame then goes silent with the socket open.
+    /// Without the idle bound, the pump would park on this read indefinitely.
+    struct StallAfterStream {
+        item: Option<Vec<u8>>,
+    }
+
+    impl futures_util::Stream for StallAfterStream {
+        type Item = reqwest::Result<Vec<u8>>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            match self.item.take() {
+                Some(v) => std::task::Poll::Ready(Some(Ok(v))),
+                // Park without self-waking; under paused virtual time the
+                // surrounding timeout's timer provides the wake.
+                None => std::task::Poll::Pending,
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_compatible_stream_times_out_instead_of_hanging() {
+        // Repro: an OpenAI-compatible aggregator (Together AI / SiliconFlow /
+        // MiniMax / DeepSeek / Arcee, …) delivers one delta then goes silent.
+        // The pump must surface a retryable StreamError rather than parking
+        // forever, and must NOT emit a final chunk — so the agent's retry sees
+        // a clean failure and re-issues the call (idempotent retry contract).
+        let seed = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n".to_vec();
+        let stream = StallAfterStream { item: Some(seed) };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(64);
+
+        let pump = ::zeroclaw_spawn::spawn!(async move {
+            pump_sse_chunks(stream, tx, false, SSE_IDLE_TIMEOUT).await;
+        });
+
+        // Let the pump emit the first delta and park on the stalled read.
+        tokio::task::yield_now().await;
+        // Jump past the idle bound; the pump must wake, emit an error, return.
+        tokio::time::advance(SSE_IDLE_TIMEOUT + std::time::Duration::from_secs(1)).await;
+
+        let mut deltas = 0usize;
+        let mut saw_final = false;
+        let mut last_err: Option<StreamError> = None;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                Ok(chunk) if chunk.is_final => saw_final = true,
+                Ok(_) => deltas += 1,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        pump.await.expect("pump task must finish, not hang");
+
+        assert_eq!(deltas, 1, "the pre-stall delta must be delivered");
+        assert!(!saw_final, "no final chunk may be emitted on an idle abort");
+        let err = last_err.expect("a StreamError must be emitted on stall");
+        assert!(
+            matches!(err, StreamError::Http(ref m) if m.contains("stalled")),
+            "expected stalled-stream Http error, got: {err:?}"
+        );
+    }
 
     fn make_model_provider(
         name: &str,

@@ -96,6 +96,13 @@ pub trait CompatFamilySpec {
     /// whose model catalog is public.
     const PUBLIC_MODEL_LISTING: bool = false;
 
+    /// Family default for the per-read SSE idle timeout (seconds). `None` keeps
+    /// the provider's built-in 90s. Override for reasoning-heavy families whose
+    /// models can legitimately pause longer than 90s between streamed tokens
+    /// (long server-side reasoning / slow prefill), e.g. DeepSeek-R1, MiniMax.
+    /// A per-alias `sse_idle_timeout_secs` in config still overrides this.
+    const SSE_IDLE_TIMEOUT_SECS: Option<u64> = None;
+
     /// Build the base compat provider with both catalog consts applied. Use
     /// this from inside `build_compat` overrides so the catalog hooks ride
     /// along with any family-specific modifiers.
@@ -120,6 +127,9 @@ pub trait CompatFamilySpec {
         }
         if Self::PUBLIC_MODEL_LISTING {
             p = p.with_public_model_listing();
+        }
+        if let Some(secs) = Self::SSE_IDLE_TIMEOUT_SECS {
+            p = p.with_sse_idle_timeout_secs(secs);
         }
         p
     }
@@ -183,6 +193,9 @@ pub fn apply_compat_options(
 ) -> Box<dyn ModelProvider> {
     if let Some(t) = opts.provider_timeout_secs {
         p = p.with_timeout_secs(t);
+    }
+    if let Some(secs) = opts.provider_sse_idle_timeout_secs {
+        p = p.with_sse_idle_timeout_secs(secs);
     }
     if let Some(ref effort) = opts.reasoning_effort {
         p = p.with_reasoning_effort(Some(effort.clone()));
@@ -463,6 +476,10 @@ impl CompatFamilySpec for DeepseekModelProviderConfig {
     const DEFAULT_URL: &'static str = "https://api.deepseek.com";
     const AUTH: AuthStyle = AuthStyle::Bearer;
     const MODELS_DEV_KEY: Option<&'static str> = Some("deepseek");
+    // deepseek-reasoner (R1) can think server-side for minutes before the first
+    // visible token; a 90s idle bound would false-abort it. Give the family more
+    // headroom (operators can still override per alias).
+    const SSE_IDLE_TIMEOUT_SECS: Option<u64> = Some(300);
 }
 impl CompatFamilySpec for TogetherModelProviderConfig {
     const DISPLAY: &'static str = "Together AI";
@@ -829,7 +846,10 @@ impl FamilyProviderFactory for MinimaxModelProviderConfig {
             resolved_key,
             AuthStyle::Bearer,
         )
-        .with_merge_system_into_user();
+        .with_merge_system_into_user()
+        // MiniMax reasoning models can pause well beyond 90s mid-stream; give
+        // the family more idle headroom (per-alias config still overrides).
+        .with_sse_idle_timeout_secs(300);
         Ok(apply_compat_options(p, opts))
     }
 
