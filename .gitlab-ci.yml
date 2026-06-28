@@ -58,12 +58,20 @@ check:
 
 test:
   stage: test
-  script:
-    - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"
-    - cargo nextest run --locked --workspace --exclude zeroclaw-desktop
+  # Scope to the ncz-os DELTA crates (where our patches live), not the whole
+  # 29-crate workspace: a full-workspace test build exhausts the gitlab.com
+  # shared-runner disk ("mold: Disk full" / "No space left on device"). The full
+  # matrix is covered by upstream's GitHub ci.yml on proper runners; the GitLab
+  # gate's job is to validate OUR delta. debuginfo=0 keeps artifacts small.
   variables:
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+  script:
+    - curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"
+    - cargo nextest run --locked
+        -p zeroclaw-infra -p zeroclaw-pricing -p zeroclaw-config
+        -p zeroclaw-runtime -p zeroclaw-channels
 
 security:
   stage: security
