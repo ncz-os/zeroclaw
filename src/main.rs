@@ -3187,7 +3187,7 @@ async fn main() -> Result<()> {
     // Docs-pipeline subcommands: stdout-only, no config load, no logging init.
     match &cli.command {
         Commands::MarkdownHelp => {
-            clap_markdown::print_help_markdown::<Cli>();
+            print_markdown_help();
             return Ok(());
         }
         Commands::MarkdownSchema => {
@@ -6255,6 +6255,117 @@ fi"#
     Ok(())
 }
 
+fn print_markdown_help() {
+    print!(
+        "{}",
+        escape_mdbook_placeholder_tags(&clap_markdown::help_markdown::<Cli>())
+    );
+}
+
+#[must_use]
+fn escape_mdbook_placeholder_tags(markdown: &str) -> String {
+    let mut escaped = String::with_capacity(markdown.len());
+    let mut in_fence = false;
+
+    for line in markdown.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        let starts_fence = is_markdown_fence_line(body);
+
+        if in_fence {
+            escaped.push_str(body);
+            escaped.push_str(newline);
+            if starts_fence {
+                in_fence = false;
+            }
+            continue;
+        }
+
+        if starts_fence {
+            in_fence = true;
+            escaped.push_str(body);
+        } else {
+            escaped.push_str(&escape_mdbook_placeholder_tags_in_line(body));
+        }
+        escaped.push_str(newline);
+    }
+
+    escaped
+}
+
+#[must_use]
+fn escape_mdbook_placeholder_tags_in_line(line: &str) -> String {
+    let mut escaped = String::with_capacity(line.len());
+    let mut index = 0;
+    let mut in_code_span = false;
+
+    while index < line.len() {
+        let Some(ch) = line[index..].chars().next() else {
+            break;
+        };
+
+        if ch == '`' {
+            in_code_span = !in_code_span;
+            escaped.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if !in_code_span
+            && ch == '<'
+            && let Some(end_offset) = line[index + 1..].find('>')
+        {
+            let name_start = index + 1;
+            let name_end = name_start + end_offset;
+            let name = &line[name_start..name_end];
+
+            if is_cli_placeholder_name(name) {
+                escaped.push('`');
+                escaped.push_str(&line[index..=name_end]);
+                escaped.push('`');
+                index = name_end + 1;
+                continue;
+            }
+        }
+
+        escaped.push(ch);
+        index += ch.len_utf8();
+    }
+
+    escaped
+}
+
+#[must_use]
+fn is_markdown_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+#[must_use]
+fn is_cli_placeholder_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        && !is_common_html_tag(name)
+}
+
+#[must_use]
+fn is_common_html_tag(name: &str) -> bool {
+    const COMMON_HTML_TAGS: &[&str] = &[
+        "a", "abbr", "br", "code", "details", "div", "em", "img", "kbd", "li", "ol", "p", "samp",
+        "span", "strong", "summary", "table", "tbody", "td", "th", "thead", "tr", "ul", "var",
+    ];
+
+    let normalized = name.to_ascii_lowercase();
+    COMMON_HTML_TAGS.contains(&normalized.as_str())
+}
+
 // ─── Gateway helper functions ───────────────────────────────────────────────
 
 /// Resolve gateway host and port from CLI args or config.
@@ -7522,6 +7633,41 @@ mod tests {
         assert!(
             !script.contains("_zeroclaw_clap_orig() { _zeroclaw \"$@\"; }"),
             "bash completion must not define _zeroclaw_clap_orig as a simple forwarder to _zeroclaw"
+        );
+    }
+
+    #[test]
+    fn markdown_help_escapes_plain_placeholders_for_mdbook() {
+        assert_eq!(
+            escape_mdbook_placeholder_tags("Send a note to <to> with <MESSAGE>.\n"),
+            "Send a note to `<to>` with `<MESSAGE>`.\n"
+        );
+    }
+
+    #[test]
+    fn markdown_help_preserves_existing_code_spans() {
+        let markdown = "Use `<to>` or `zeroclaw send <to>` from a shell.\n";
+
+        assert_eq!(escape_mdbook_placeholder_tags(markdown), markdown);
+    }
+
+    #[test]
+    fn markdown_help_preserves_fenced_code_blocks() {
+        let markdown = "Example:\n```bash\nzeroclaw send <to>\n```\nThen pass <message>.\n";
+
+        assert_eq!(
+            escape_mdbook_placeholder_tags(markdown),
+            "Example:\n```bash\nzeroclaw send <to>\n```\nThen pass `<message>`.\n"
+        );
+    }
+
+    #[test]
+    fn markdown_help_does_not_escape_common_html_or_autolinks() {
+        let markdown = "Use <br> for HTML, see <https://example.com>, then pass <arg-name>.\n";
+
+        assert_eq!(
+            escape_mdbook_placeholder_tags(markdown),
+            "Use <br> for HTML, see <https://example.com>, then pass `<arg-name>`.\n"
         );
     }
 
