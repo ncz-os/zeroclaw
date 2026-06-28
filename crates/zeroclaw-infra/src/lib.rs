@@ -8,6 +8,8 @@ pub mod net_guard;
 pub mod session_backend;
 #[cfg(feature = "backend-db2")]
 pub mod session_db2;
+#[cfg(feature = "backend-mnemos")]
+pub mod session_mnemos;
 #[cfg(feature = "backend-mysql")]
 pub mod session_mysql;
 #[cfg(feature = "backend-oracle")]
@@ -104,8 +106,22 @@ pub fn make_session_backend(
             Ok(Arc::new(store))
         }
 
+        #[cfg(feature = "backend-mnemos")]
+        "mnemos" => {
+            let url = channels.mnemos_url.as_deref().ok_or_else(|| {
+                std::io::Error::other("session_backend=mnemos requires mnemos_url in [channels]")
+            })?;
+            Ok(Arc::new(session_mnemos::MnemosSessionBackend::new(
+                url,
+                channels.mnemos_token.clone(),
+                channels.mnemos_category.as_deref(),
+            )))
+        }
+
         #[cfg(not(feature = "backend-postgres"))]
         "postgres" => Err(unavailable_backend("postgres", "backend-postgres")),
+        #[cfg(not(feature = "backend-mnemos"))]
+        "mnemos" => Err(unavailable_backend("mnemos", "backend-mnemos")),
         #[cfg(not(feature = "backend-mysql"))]
         "mysql" => Err(unavailable_backend("mysql", "backend-mysql")),
         #[cfg(not(feature = "backend-oracle"))]
@@ -121,7 +137,7 @@ pub fn make_session_backend(
                     .with_attrs(::serde_json::json!({"other": other})),
                 &format!(
                     "Unknown session_backend '{other}'; falling back to sqlite. \
-                     Valid values: 'sqlite' (default), 'jsonl', 'postgres', 'mysql', 'oracle', 'db2'."
+                     Valid values: 'sqlite' (default), 'jsonl', 'postgres', 'mysql', 'oracle', 'db2', 'mnemos'."
                 )
             );
             Ok(Arc::new(open_sqlite_with_jsonl_import(workspace_dir)?))

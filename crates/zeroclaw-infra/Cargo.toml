@@ -17,6 +17,9 @@ backend-oracle = ["dep:oracle", "dep:r2d2"]
 ## IBM Db2 session backend (adds `odbc-api`, `r2d2`).
 ## Requires IBM Db2 CLI / ODBC driver at runtime; set LD_LIBRARY_PATH to the Db2 lib64 dir.
 backend-db2 = ["dep:odbc-api", "dep:r2d2"]
+## MNEMOS session backend (ncz-os "MNEMOS-first"): logs session turns to a MNEMOS
+## datastore over REST. Pure HTTP (`ureq`); no native client libs required.
+backend-mnemos = ["dep:ureq"]
 
 [dependencies]
 zeroclaw-log.workspace = true
@@ -38,6 +41,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 mysql = { version = "25", optional = true, features = ["chrono"] }
+ureq = { version = "2", optional = true, features = ["json"] }
 tokio = { version = "1.50", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]

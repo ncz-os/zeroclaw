@@ -11936,6 +11936,19 @@ pub struct ChannelsConfig {
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db2_conn_str: Option<String>,
+    /// MNEMOS API base URL for `session_backend = "mnemos"` (e.g.
+    /// `http://mnemos-host:5002`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemos_url: Option<String>,
+    /// MNEMOS bearer token for `session_backend = "mnemos"`.
+    #[secret]
+    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemos_token: Option<String>,
+    /// MNEMOS category that groups this fleet's session memories. Defaults to
+    /// `zoder-session` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemos_category: Option<String>,
     /// Maximum pooled connections for remote session backends. Default: `5`.
     #[serde(default = "default_session_pool_size")]
     pub pool_size: u32,
@@ -12350,6 +12363,9 @@ impl Default for ChannelsConfig {
             oracle_password: None,
             oracle_dsn: None,
             db2_conn_str: None,
+            mnemos_url: None,
+            mnemos_token: None,
+            mnemos_category: None,
             pool_size: default_session_pool_size(),
             debounce_ms: 0,
         }
@@ -21558,6 +21574,9 @@ auto_save = true
                 oracle_password: None,
                 oracle_dsn: None,
                 db2_conn_str: None,
+                mnemos_url: None,
+                mnemos_token: None,
+                mnemos_category: None,
                 pool_size: default_session_pool_size(),
                 debounce_ms: 0,
             },
@@ -23100,6 +23119,9 @@ allowed_users = ["@u:matrix.org"]
             oracle_password: None,
             oracle_dsn: None,
             db2_conn_str: None,
+            mnemos_url: None,
+            mnemos_token: None,
+            mnemos_category: None,
             pool_size: default_session_pool_size(),
             debounce_ms: 0,
         };
@@ -23609,6 +23631,9 @@ allowed_numbers = ["+1", "+2"]
             oracle_password: None,
             oracle_dsn: None,
             db2_conn_str: None,
+            mnemos_url: None,
+            mnemos_token: None,
+            mnemos_category: None,
             pool_size: default_session_pool_size(),
             debounce_ms: 0,
         };
