@@ -235,42 +235,6 @@ impl CostTracker {
         })
     }
 
-    /// Cost summary for a single agent within an optional `[from, to)` window.
-    /// Mirrors [`Self::get_summary_in_bounds`] but also filters to records
-    /// attributed to `agent_alias`, so a caller attributing ONE agentic turn
-    /// (window + agent) gets that turn's spend instead of the agent's
-    /// daemon-lifetime total.
-    pub fn get_summary_in_bounds_for_agent(
-        &self,
-        agent_alias: &str,
-        from: Option<DateTime<Utc>>,
-        to: Option<DateTime<Utc>>,
-    ) -> Result<CostSummary> {
-        let (daily_cost, monthly_cost, records) = {
-            let mut storage = self.lock_storage();
-            let (d, m) = storage.get_aggregated_costs()?;
-            let recs: Vec<CostRecord> = storage
-                .records_in_bounds(from, to)?
-                .into_iter()
-                .filter(|r| r.agent_alias.as_deref() == Some(agent_alias))
-                .collect();
-            (d, m, recs)
-        };
-        let total_cost: f64 = records.iter().map(|r| r.usage.cost_usd).sum();
-        let total_tokens: u64 = records.iter().map(|r| r.usage.total_tokens).sum();
-        let request_count = records.len();
-        let by_model = build_model_stats(records.iter());
-        Ok(CostSummary {
-            session_cost_usd: total_cost,
-            daily_cost_usd: daily_cost,
-            monthly_cost_usd: monthly_cost,
-            total_tokens,
-            request_count,
-            by_model,
-            by_agent: HashMap::new(),
-        })
-    }
-
     /// Get the current cost summary scoped to a single agent alias. The
     /// session/day/month figures and `by_model` are filtered to records
     /// attributed to that alias; `by_agent` is left empty since the
@@ -618,12 +582,13 @@ impl CostStorage {
                                 module_path!(),
                                 ::zeroclaw_log::Action::Note
                             )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                            &format!(
-                                "Skipping malformed cost record at {}:{}: {error}",
-                                self.path.display().to_string(),
-                                line_number + 1
-                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "path": self.path.display().to_string(),
+                                "line": line_number + 1,
+                                "error": error.to_string(),
+                            })),
+                            "skipping malformed cost record"
                         );
                     }
                 }

@@ -444,6 +444,7 @@ mod tests {
             tui_id: None,
             tui_sig: None,
             env: Default::default(),
+            client_capabilities: None,
         };
         writer
             .write_all(rpc_request(Method::Initialize, &params, 1).as_bytes())
@@ -490,6 +491,7 @@ mod tests {
             tui_id: None,
             tui_sig: None,
             env: Default::default(),
+            client_capabilities: None,
         };
         writer
             .write_all(rpc_request(Method::Initialize, &init_params, 1).as_bytes())
@@ -734,6 +736,7 @@ mod tests {
             tui_id: None,
             tui_sig: None,
             env: Default::default(),
+            client_capabilities: None,
         };
         write_half
             .write_all(rpc_request(Method::Initialize, &init_params, 1).as_bytes())

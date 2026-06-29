@@ -389,6 +389,19 @@ pub struct RpcDispatcher {
     tui_id: Option<String>,
     /// Transport-level peer label (e.g. `unix:pid=1234,uid=1000`).
     peer_label: String,
+    /// Client-side elicitation capabilities advertised during `initialize`
+    /// (parsed from `params.clientCapabilities.elicitation`). Connection-
+    /// scoped: ACP `initialize` happens once per connection, before any
+    /// `session/new`. The dispatcher is the canonical owner for the
+    /// lifetime of the TUI connection; the per-session `RpcApprovalChannel`
+    /// receives a `Copy` of this value at session-creation time so it can
+    /// route `request_choice` / `request_multi_choice` over
+    /// `elicitation/create` when supported.
+    ///
+    /// Mirrors the equivalent slot on `AcpServer.client_elicitation_caps`
+    /// — Zerocode's Code tab is a superset of ACP, so both surfaces speak
+    /// the same elicitation RFD.
+    client_elicitation_caps: zeroclaw_api::elicitation::ElicitationCapabilities,
 }
 
 impl RpcDispatcher {
@@ -399,6 +412,7 @@ impl RpcDispatcher {
             authenticated: false,
             tui_id: None,
             peer_label,
+            client_elicitation_caps: zeroclaw_api::elicitation::ElicitationCapabilities::default(),
         }
     }
 
@@ -425,6 +439,7 @@ impl RpcDispatcher {
             authenticated: true,
             tui_id: self.tui_id.clone(),
             peer_label: self.peer_label.clone(),
+            client_elicitation_caps: self.client_elicitation_caps,
         }
     }
 
@@ -480,18 +495,10 @@ impl RpcDispatcher {
         {
             return true;
         }
-        if let Some(backend) = self.ctx.session_backend.as_ref() {
-            let backend = Arc::clone(backend);
-            let from = from.to_string();
-            if tokio::task::spawn_blocking(move || backend.count_agent_attribution(&from))
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or(0)
-                > 0
-            {
-                return true;
-            }
+        if let Some(backend) = self.ctx.session_backend.as_ref()
+            && backend.count_agent_attribution(from).unwrap_or(0) > 0
+        {
+            return true;
         }
         false
     }
@@ -704,6 +711,18 @@ impl RpcDispatcher {
             ));
         }
 
+        // Cache the parsed elicitation capabilities for the lifetime of this
+        // connection. The per-session `RpcApprovalChannel` reads them at
+        // construction time so it can route `request_choice` /
+        // `request_multi_choice` over `elicitation/create` when the client
+        // advertises support. Mirrors the equivalent slot on `AcpServer`.
+        let elicitation = req
+            .client_capabilities
+            .as_ref()
+            .and_then(|c| c.get("elicitation"));
+        self.client_elicitation_caps =
+            zeroclaw_api::elicitation::ElicitationCapabilities::from_value(elicitation);
+
         // TUI identity: reconnect with previous credentials or generate new
         let tui_id = if let (Some(claimed_id), Some(sig)) =
             (req.tui_id.as_deref(), req.tui_sig.as_deref())
@@ -763,14 +782,12 @@ impl RpcDispatcher {
         let ids = self.ctx.sessions.list_ids().await;
         // Count persisted sessions (channel-originated) that aren't already
         // in the in-memory RPC store.
-        let persisted_count = if let Some(backend) = self.ctx.session_backend.as_ref() {
-            let backend = Arc::clone(backend);
-            tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata().len())
-                .await
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let persisted_count = self
+            .ctx
+            .session_backend
+            .as_ref()
+            .map(|b| b.list_sessions_with_metadata().len())
+            .unwrap_or(0);
         let total = ids.len().max(persisted_count);
         to_result(StatusResult {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -922,6 +939,7 @@ impl RpcDispatcher {
             session_id.clone(),
             Arc::clone(&self.rpc),
             Arc::clone(&self.ctx.approval_pending),
+            self.client_elicitation_caps,
         ));
         agent.channel_handles().register_channel("rpc", approval_ch);
 
@@ -1067,14 +1085,8 @@ impl RpcDispatcher {
             crate::rpc::types::ChatMode::Chat => {
                 if let Some(ref backend) = self.ctx.session_backend {
                     let session_key = format!("rpc_{session_id}");
-                    let backend = Arc::clone(backend);
-                    let agent_alias = req.agent_alias.clone();
-                    let stored = tokio::task::spawn_blocking(move || {
-                        let _ = backend.set_session_agent_alias(&session_key, &agent_alias);
-                        backend.load(&session_key)
-                    })
-                    .await
-                    .unwrap_or_default();
+                    let _ = backend.set_session_agent_alias(&session_key, &req.agent_alias);
+                    let stored = backend.load(&session_key);
                     if !stored.is_empty() {
                         self.ctx.sessions.seed_history(&session_id, &stored).await;
                         message_count = stored.len();
@@ -1329,6 +1341,7 @@ impl RpcDispatcher {
             sid.to_string(),
             Arc::clone(&self.rpc),
             Arc::clone(&self.ctx.approval_pending),
+            self.client_elicitation_caps,
         ));
         agent.channel_handles().register_channel("rpc", approval_ch);
 
@@ -1704,25 +1717,19 @@ impl RpcDispatcher {
             }
             crate::rpc::types::ChatMode::Chat => {
                 if let Some(ref backend) = self.ctx.session_backend {
-                    let backend = Arc::clone(backend);
                     let key = format!("rpc_{sid}");
-                    let prompt = prompt.clone();
-                    let assistant_text = match &outcome {
-                        Ok(TurnOutcome::Completed { text, .. }) => Some(text.clone()),
+                    let _ = backend.append(&key, &ChatMessage::user(&prompt));
+                    match &outcome {
+                        Ok(TurnOutcome::Completed { text, .. }) => {
+                            let _ = backend.append(&key, &ChatMessage::assistant(text));
+                        }
                         Ok(TurnOutcome::Cancelled { partial_text, .. })
                             if !partial_text.is_empty() =>
                         {
-                            Some(partial_text.clone())
+                            let _ = backend.append(&key, &ChatMessage::assistant(partial_text));
                         }
-                        _ => None,
-                    };
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = backend.append(&key, &ChatMessage::user(&prompt));
-                        if let Some(text) = assistant_text {
-                            let _ = backend.append(&key, &ChatMessage::assistant(&text));
-                        }
-                    })
-                    .await;
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2011,26 +2018,18 @@ impl RpcDispatcher {
         let config = self.ctx.config.read().clone();
 
         // Use FTS when a query is provided, plain list otherwise.
-        let backend = Arc::clone(backend);
         let all = if let Some(ref keyword) = req.query {
             if keyword.trim().is_empty() {
-                tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
-                    .await
-                    .unwrap_or_default()
+                backend.list_sessions_with_metadata()
             } else {
                 use zeroclaw_infra::session_backend::SessionQuery;
-                let query = SessionQuery {
+                backend.search(&SessionQuery {
                     keyword: Some(keyword.clone()),
                     limit: req.limit,
-                };
-                tokio::task::spawn_blocking(move || backend.search(&query))
-                    .await
-                    .unwrap_or_default()
+                })
             }
         } else {
-            tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
-                .await
-                .unwrap_or_default()
+            backend.list_sessions_with_metadata()
         };
 
         let sessions: Vec<SessionEntry> = all
@@ -2115,19 +2114,14 @@ impl RpcDispatcher {
             format!("rpc_{}", req.session_id),
             format!("gw_{}", req.session_id),
         ];
-        let backend = Arc::clone(backend);
-        let mut raw: Vec<zeroclaw_api::model_provider::ChatMessage> =
-            tokio::task::spawn_blocking(move || {
-                for key in &candidates {
-                    let loaded = backend.load(key);
-                    if !loaded.is_empty() {
-                        return loaded;
-                    }
-                }
-                Vec::new()
-            })
-            .await
-            .unwrap_or_default();
+        let mut raw: Vec<zeroclaw_api::model_provider::ChatMessage> = Vec::new();
+        for key in &candidates {
+            let loaded = backend.load(key);
+            if !loaded.is_empty() {
+                raw = loaded;
+                break;
+            }
+        }
 
         // Fallback: ACP sessions live in a dedicated store (`acp-sessions.db`)
         // and are keyed by their raw UUID — they will never be found in the
@@ -2267,18 +2261,13 @@ impl RpcDispatcher {
         self.ctx.sessions.remove(&req.session_id).await;
         // Remove from persistent backend — try raw id, then prefixed variants.
         if let Some(ref backend) = self.ctx.session_backend {
-            let backend = Arc::clone(backend);
-            let keys = [
+            for key in &[
                 req.session_id.clone(),
                 format!("rpc_{}", req.session_id),
                 format!("gw_{}", req.session_id),
-            ];
-            let _ = tokio::task::spawn_blocking(move || {
-                for key in &keys {
-                    let _ = backend.delete_session(key);
-                }
-            })
-            .await;
+            ] {
+                let _ = backend.delete_session(key);
+            }
         }
         to_result(SessionDeleteResult {
             session_id: req.session_id,
@@ -3087,12 +3076,7 @@ impl RpcDispatcher {
         let rpc_counts = self.ctx.sessions.count_by_agent().await;
         let mut backend_counts = std::collections::HashMap::<String, usize>::new();
         if let Some(ref backend) = self.ctx.session_backend {
-            let backend = Arc::clone(backend);
-            let metadata =
-                tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
-                    .await
-                    .unwrap_or_default();
-            for meta in metadata {
+            for meta in backend.list_sessions_with_metadata() {
                 let alias = meta.agent_alias.or_else(|| {
                     meta.channel_id
                         .as_deref()
@@ -3142,19 +3126,13 @@ impl RpcDispatcher {
         };
         let from = req.from.as_deref().map(parse_bound).transpose()?;
         let to = req.to.as_deref().map(parse_bound).transpose()?;
+        // Precedence (inherited from the existing per-agent path): an explicit
+        // `agent` selects that agent's summary and the [from, to) window does
+        // NOT apply; the window scopes only the fleet-wide summary.
         let summary = if let Some(agent) = req.agent {
-            // When BOTH an agent and a window are given, scope to that agent's
-            // spend WITHIN the window (e.g. attributing one agentic turn) — not
-            // the agent's daemon-lifetime total, which would inflate every run.
-            if from.is_some() || to.is_some() {
-                tracker
-                    .get_summary_in_bounds_for_agent(&agent, from, to)
-                    .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
-            } else {
-                tracker
-                    .get_summary_for_agent(&agent)
-                    .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
-            }
+            tracker
+                .get_summary_for_agent(&agent)
+                .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cost query failed: {e}")))?
         } else if from.is_some() || to.is_some() {
             tracker
                 .get_summary_in_bounds(from, to)
@@ -3186,7 +3164,11 @@ impl RpcDispatcher {
                 })?;
                 Ok(value)
             }
-            Err(_) => Ok(Value::Null),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
+            Err(e) => Err(rpc_err(
+                INTERNAL_ERROR,
+                format!("failed to read org_cost.json: {e}"),
+            )),
         }
     }
 
@@ -4176,6 +4158,138 @@ mod tests {
         );
     }
 
+    /// Regression test for #7733. An agent whose `mcp_bundles` is empty
+    /// must receive ZERO MCP tools at session/new time, even when the
+    /// global `[mcp.servers]` list is non-empty and another agent (here
+    /// `test-agent`) has been granted that same server through a bundle.
+    /// In deferred mode the visible signal is the absence of
+    /// `tool_search`.
+    ///
+    /// If a future change reverts any production call site from
+    /// `config.mcp_servers_for_agent(agent_alias)` back to
+    /// `&config.mcp.servers`, this test fails.
+    #[tokio::test]
+    async fn chat_session_new_omits_mcp_tools_when_agent_has_no_bundles_deferred() {
+        use zeroclaw_config::schema::AliasedAgentConfig;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let server = start_mock_mcp_http_server("domains.list").await;
+        let mut config = make_mcp_granting_config(&tmp, server.uri(), true);
+
+        // Add a SECOND agent with no `mcp_bundles`. Reuse `test-agent`'s
+        // model_provider/risk_profile so the agent is fully constructible
+        // without touching providers/risk_profiles.
+        let template = config
+            .agents
+            .get("test-agent")
+            .cloned()
+            .expect("test-agent must exist in make_mcp_granting_config");
+        config.agents.insert(
+            "unscoped-agent".to_string(),
+            AliasedAgentConfig {
+                enabled: true,
+                model_provider: template.model_provider.clone(),
+                risk_profile: template.risk_profile.clone(),
+                mcp_bundles: Vec::new(), // explicit: no grant
+                ..AliasedAgentConfig::default()
+            },
+        );
+
+        let (dispatcher, sessions) = make_acp_test_dispatcher(config);
+
+        let params = json!({
+            "agent_alias": "unscoped-agent",
+            "chat_mode": "chat",
+            "session_id": "chat-mcp-unscoped-deferred-001"
+        });
+        let result = dispatcher.handle_session_new_for_test(&params).await;
+        assert!(
+            result.is_ok(),
+            "session/new for an unscoped agent should still succeed; got: {:?}",
+            result.err()
+        );
+
+        let agent_arc = sessions
+            .get_agent("chat-mcp-unscoped-deferred-001")
+            .await
+            .expect("session must be registered after session/new");
+        let agent = agent_arc.lock().await;
+        let names = agent.tool_names();
+        assert!(
+            !names.contains(&"tool_search"),
+            "Unscoped agent must NOT expose `tool_search` in deferred mode \
+             (mcp_bundles is empty -> no MCP connection -> no deferred \
+             registry -> no tool_search). Tools were: {names:?}"
+        );
+        // And, defensively, no prefixed MCP tool either.
+        assert!(
+            !names.iter().any(|n| n.contains("__")),
+            "Unscoped agent must expose zero `<server>__<tool>` MCP tools; \
+             tools were: {names:?}"
+        );
+    }
+
+    /// Eager-mode counterpart to
+    /// `chat_session_new_omits_mcp_tools_when_agent_has_no_bundles_deferred`.
+    /// In eager mode the visible signal is the absence of any prefixed
+    /// `<server>__<tool>` name (here: `remote__domains.list`).
+    #[tokio::test]
+    async fn chat_session_new_omits_mcp_tools_when_agent_has_no_bundles_eager() {
+        use zeroclaw_config::schema::AliasedAgentConfig;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let server = start_mock_mcp_http_server("domains.list").await;
+        let mut config = make_mcp_granting_config(&tmp, server.uri(), false);
+
+        let template = config
+            .agents
+            .get("test-agent")
+            .cloned()
+            .expect("test-agent must exist in make_mcp_granting_config");
+        config.agents.insert(
+            "unscoped-agent".to_string(),
+            AliasedAgentConfig {
+                enabled: true,
+                model_provider: template.model_provider.clone(),
+                risk_profile: template.risk_profile.clone(),
+                mcp_bundles: Vec::new(),
+                ..AliasedAgentConfig::default()
+            },
+        );
+
+        let (dispatcher, sessions) = make_acp_test_dispatcher(config);
+
+        let params = json!({
+            "agent_alias": "unscoped-agent",
+            "chat_mode": "chat",
+            "session_id": "chat-mcp-unscoped-eager-001"
+        });
+        let result = dispatcher.handle_session_new_for_test(&params).await;
+        assert!(
+            result.is_ok(),
+            "session/new for an unscoped agent should still succeed; got: {:?}",
+            result.err()
+        );
+
+        let agent_arc = sessions
+            .get_agent("chat-mcp-unscoped-eager-001")
+            .await
+            .expect("session must be registered after session/new");
+        let agent = agent_arc.lock().await;
+        let names = agent.tool_names();
+        assert!(
+            !names.contains(&"remote__domains.list"),
+            "Unscoped agent must NOT expose `remote__domains.list` in \
+             eager mode (mcp_bundles is empty -> no MCP connection -> \
+             no eager registration). Tools were: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("remote__")),
+            "No `remote__*` tool may leak to an unscoped agent; tools \
+             were: {names:?}"
+        );
+    }
+
     #[tokio::test]
     async fn acp_session_new_skips_mcp_tools() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4209,6 +4323,112 @@ mod tests {
         assert!(
             !names.contains(&"tool_search") && !names.contains(&"remote__domains.list"),
             "ACP session must skip MCP init (no `tool_search`, no MCP tools); tools: {names:?}"
+        );
+    }
+
+    fn make_cost_query_test_dispatcher(data_dir: &std::path::Path) -> RpcDispatcher {
+        use zeroclaw_infra::session_queue::SessionActorQueue;
+        let queue = Arc::new(SessionActorQueue::new(4, 10, 60));
+        let sessions = Arc::new(crate::rpc::session::SessionStore::new(16, queue));
+        let tracker = Arc::new(
+            zeroclaw_config::cost::tracker::CostTracker::new(
+                zeroclaw_config::schema::CostConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                data_dir,
+            )
+            .unwrap(),
+        );
+        let config = zeroclaw_config::schema::Config {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
+        };
+        let ctx = RpcContext::minimal_with_cost_tracker(config, sessions, tracker);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        RpcDispatcher::new(ctx, tx, "test-peer-costquery:pid=1".into())
+    }
+
+    #[test]
+    fn cost_query_invalid_rfc3339_bound_is_invalid_params() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let d = make_cost_query_test_dispatcher(tmp.path());
+        let err = d
+            .handle_cost_query(&serde_json::json!({ "from": "not-a-real-date" }))
+            .expect_err("an invalid RFC3339 bound must be rejected");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(err.message.contains("invalid date"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn cost_query_valid_bounds_reach_in_bounds_summary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let d = make_cost_query_test_dispatcher(tmp.path());
+        let res = d.handle_cost_query(&serde_json::json!({
+            "from": "2026-01-01T00:00:00Z",
+            "to": "2026-07-01T00:00:00Z"
+        }));
+        assert!(
+            res.is_ok(),
+            "a valid bounded cost/query must reach get_summary_in_bounds: {res:?}"
+        );
+    }
+
+    fn make_cost_test_dispatcher(data_dir: &std::path::Path) -> RpcDispatcher {
+        use zeroclaw_infra::session_queue::SessionActorQueue;
+        let queue = Arc::new(SessionActorQueue::new(4, 10, 60));
+        let sessions = Arc::new(crate::rpc::session::SessionStore::new(16, queue));
+        let config = zeroclaw_config::schema::Config {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
+        };
+        let ctx = RpcContext::minimal(config, sessions);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        RpcDispatcher::new(ctx, tx, "test-peer-cost:pid=1".into())
+    }
+
+    // cost/org: null only for a genuinely-absent snapshot; any other read failure
+    // (unreadable file, a directory at the path, bad JSON) surfaces as an error so a
+    // broken deployment is not mistaken for a vanilla one. (Audacity88/JordanTheJet, #8482.)
+    #[test]
+    fn cost_org_absent_returns_null() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let d = make_cost_test_dispatcher(tmp.path());
+        assert_eq!(d.handle_cost_org().unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn cost_org_present_returns_snapshot_verbatim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("org_cost.json"),
+            r#"{"org":"acme","billed_usd":12.5}"#,
+        )
+        .unwrap();
+        let d = make_cost_test_dispatcher(tmp.path());
+        let v = d.handle_cost_org().unwrap();
+        assert_eq!(v["org"], serde_json::json!("acme"));
+        assert_eq!(v["billed_usd"], serde_json::json!(12.5));
+    }
+
+    #[test]
+    fn cost_org_invalid_json_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("org_cost.json"), "not valid json{").unwrap();
+        let d = make_cost_test_dispatcher(tmp.path());
+        assert!(d.handle_cost_org().is_err());
+    }
+
+    #[test]
+    fn cost_org_unreadable_non_notfound_errors() {
+        // A directory at the snapshot path produces a non-NotFound read error; it must
+        // surface as an RPC error, not masquerade as "no snapshot configured".
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("org_cost.json")).unwrap();
+        let d = make_cost_test_dispatcher(tmp.path());
+        assert!(
+            d.handle_cost_org().is_err(),
+            "an unreadable snapshot must not be reported as absent"
         );
     }
 
@@ -4668,6 +4888,51 @@ mod tests {
         assert_eq!(val["server_version"], "0.1.0");
     }
 
+    /// Cover the `initialize` parsing path that caches the TUI's
+    /// `clientCapabilities.elicitation` block so the per-session
+    /// `RpcApprovalChannel` can route `request_choice` over
+    /// `elicitation/create`. Source-of-truth check: the dispatcher
+    /// is the canonical owner; the test reads the field directly.
+    #[tokio::test]
+    async fn handle_initialize_caches_elicitation_form_capability() {
+        let (mut dispatcher, _sessions) =
+            make_acp_test_dispatcher(zeroclaw_config::schema::Config::default());
+        let params = serde_json::json!({
+            "protocol_version": RPC_PROTOCOL_VERSION,
+            "clientCapabilities": { "elicitation": { "form": {} } }
+        });
+        let result = dispatcher.handle_initialize(&params).await;
+        assert!(result.is_ok(), "initialize should succeed; got {result:?}");
+        assert!(dispatcher.client_elicitation_caps.form);
+        assert!(!dispatcher.client_elicitation_caps.url);
+    }
+
+    #[tokio::test]
+    async fn handle_initialize_without_elicitation_leaves_caps_unset() {
+        let (mut dispatcher, _sessions) =
+            make_acp_test_dispatcher(zeroclaw_config::schema::Config::default());
+        let params = serde_json::json!({
+            "protocol_version": RPC_PROTOCOL_VERSION,
+        });
+        let _ = dispatcher.handle_initialize(&params).await.unwrap();
+        assert!(!dispatcher.client_elicitation_caps.form);
+        assert!(!dispatcher.client_elicitation_caps.url);
+    }
+
+    #[tokio::test]
+    async fn handle_initialize_empty_elicitation_object_is_form_only() {
+        // RFD backward-compat: `"elicitation": {}` advertises form-only.
+        let (mut dispatcher, _sessions) =
+            make_acp_test_dispatcher(zeroclaw_config::schema::Config::default());
+        let params = serde_json::json!({
+            "protocol_version": RPC_PROTOCOL_VERSION,
+            "clientCapabilities": { "elicitation": {} }
+        });
+        let _ = dispatcher.handle_initialize(&params).await.unwrap();
+        assert!(dispatcher.client_elicitation_caps.form);
+        assert!(!dispatcher.client_elicitation_caps.url);
+    }
+
     // -----------------------------------------------------------------------
     // ACP session/new — memory-tool exclusion
     // -----------------------------------------------------------------------
@@ -5035,7 +5300,7 @@ mod tests {
 
     fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::schema::Config {
         use zeroclaw_config::multi_agent::{AccessMode, AgentAlias, PeerGroupConfig};
-        use zeroclaw_config::schema::AliasedAgentConfig;
+        use zeroclaw_config::schema::{AliasedAgentConfig, DelegateTargetConfig};
 
         let mut config = zeroclaw_config::schema::Config {
             config_path: tmp.path().join("config.toml"),
@@ -5047,7 +5312,7 @@ mod tests {
         config.acp.default_agent = Some("alpha".to_string());
 
         let mut alpha = AliasedAgentConfig {
-            delegates: vec!["alpha".to_string()],
+            delegates: vec![DelegateTargetConfig::bounded("alpha")],
             ..Default::default()
         };
         alpha
@@ -5057,7 +5322,7 @@ mod tests {
         config.agents.insert("alpha".to_string(), alpha);
 
         let mut reviewer = AliasedAgentConfig {
-            delegates: vec!["alpha".to_string()],
+            delegates: vec![DelegateTargetConfig::bounded("alpha")],
             ..Default::default()
         };
         reviewer
@@ -5104,7 +5369,12 @@ mod tests {
         assert!(config.agents.contains_key("beta"));
         assert_eq!(config.heartbeat.agent, "beta");
         assert_eq!(config.acp.default_agent.as_deref(), Some("beta"));
-        assert_eq!(config.agents["beta"].delegates, vec!["beta".to_string()]);
+        assert_eq!(
+            config.agents["beta"].delegates,
+            vec![zeroclaw_config::schema::DelegateTargetConfig::bounded(
+                "beta"
+            )]
+        );
         assert!(
             config.agents["beta"]
                 .workspace
@@ -5113,7 +5383,9 @@ mod tests {
         );
         assert_eq!(
             config.agents["reviewer"].delegates,
-            vec!["beta".to_string()]
+            vec![zeroclaw_config::schema::DelegateTargetConfig::bounded(
+                "beta"
+            )]
         );
         assert_eq!(
             config.agents["reviewer"].workspace.read_memory_from,
