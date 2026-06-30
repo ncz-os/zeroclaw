@@ -3,6 +3,7 @@
 //! This module provides a single implementation that works for all of them.
 
 use crate::multimodal;
+use crate::request_payload::non_empty_string_field;
 use crate::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     Provider, StreamChunk, StreamError, StreamEvent, StreamOptions, StreamResult, TokenUsage,
@@ -1517,10 +1518,8 @@ impl OpenAiCompatibleProvider {
                         })
                         .collect::<Vec<_>>();
 
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|value| MessageContent::Text(value.to_string()));
+                    let content =
+                        non_empty_string_field(&value, "content").map(MessageContent::Text);
 
                     let reasoning_content = value
                         .get("reasoning_content")
@@ -4054,6 +4053,59 @@ mod tests {
         let native = OpenAiCompatibleProvider::convert_messages_for_native(&messages, true);
         assert_eq!(native.len(), 1);
         assert!(native[0].reasoning_content.is_none());
+    }
+
+    #[test]
+    fn convert_messages_for_native_omits_empty_tool_call_content() {
+        let empty_content = serde_json::json!({
+            "content": "",
+            "tool_calls": [{
+                "id": "tc_empty",
+                "name": "shell",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }]
+        });
+        let whitespace_content = serde_json::json!({
+            "content": " \n\t ",
+            "tool_calls": [{
+                "id": "tc_whitespace",
+                "name": "shell",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }]
+        });
+        let non_empty_content = serde_json::json!({
+            "content": "I will check.",
+            "tool_calls": [{
+                "id": "tc_text",
+                "name": "shell",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }]
+        });
+
+        let messages = vec![
+            ChatMessage::assistant(empty_content.to_string()),
+            ChatMessage::assistant(whitespace_content.to_string()),
+            ChatMessage::assistant(non_empty_content.to_string()),
+        ];
+        let native = OpenAiCompatibleProvider::convert_messages_for_native(&messages, true);
+
+        let empty_json = serde_json::to_value(&native[0]).unwrap();
+        assert!(
+            empty_json.get("content").is_none(),
+            "empty assistant tool-call content should be omitted"
+        );
+
+        let whitespace_json = serde_json::to_value(&native[1]).unwrap();
+        assert!(
+            whitespace_json.get("content").is_none(),
+            "whitespace assistant tool-call content should be omitted"
+        );
+
+        let non_empty_json = serde_json::to_value(&native[2]).unwrap();
+        assert_eq!(
+            non_empty_json["content"],
+            serde_json::json!("I will check.")
+        );
     }
 
     #[test]
