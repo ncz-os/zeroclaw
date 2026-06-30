@@ -11,6 +11,7 @@
 //! GitHub could change or revoke this at any time, which would break all
 //! third-party integrations simultaneously.
 
+use crate::request_payload::non_empty_string_field;
 use crate::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     Provider, TokenUsage, ToolCall as ProviderToolCall,
@@ -321,10 +322,7 @@ impl CopilotProvider {
                         })
                         .collect::<Vec<_>>();
 
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|s| ApiContent::Text(s.to_string()));
+                    let content = non_empty_string_field(&value, "content").map(ApiContent::Text);
 
                     return ApiMessage {
                         role: "assistant".to_string(),
