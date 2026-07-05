@@ -490,3 +490,20 @@ zc-config-footer-action-new-line = new line
 ## Inline hint shown on the selected config field row. The { $keys } placeholder
 ## is resolved from the current keybinding for ConfigTabAction::Enter.
 zc-config-field-edit-hint = { $keys } → press to edit
+
+## Cost / usage report panel (ReportPanel). Queries the daemon cost engine
+## (cost/query) and renders totals by period, model, and agent.
+zc-pane-report = Report
+zc-report-loading = Loading cost report…
+zc-report-not-available = Cost reporting is not available on this daemon.
+zc-report-section-periods = Periods
+zc-report-period-session = Session
+zc-report-period-today = Today
+zc-report-period-month = Month
+zc-report-total-tokens = Total tokens
+zc-report-total-requests = Total requests
+zc-report-section-by-model = By model
+zc-report-section-by-agent = By agent
+zc-report-help-desc = Cost and usage report — totals by period, model, and agent
+zc-report-help-refresh = refresh
+zc-report-help-scroll = scroll
