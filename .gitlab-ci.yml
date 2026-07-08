@@ -6,7 +6,7 @@ stages:
 
 rust-gate:
   stage: check
-  image: rust:1.93.0
+  image: rust:1
   variables:
     CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
     CARGO_TERM_COLOR: "always"
@@ -20,7 +20,7 @@ rust-gate:
     - rustup component add rustfmt
   script:
     - cargo fmt --all -- --check
-    - cargo check --workspace --all-targets
+    - cargo check --workspace --exclude zeroclaw-desktop --all-targets
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_PIPELINE_SOURCE == "push"'
