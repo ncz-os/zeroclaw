@@ -1,0 +1,26 @@
+# GitLab CI — light Rust gate (fmt + check) for the zeroclaw fork on GitLab
+# SaaS shared runners. Heavy clippy/test/release builds run on Buildkite
+# (self-hosted, ncz-os) per the GRAEAE architecture review.
+stages:
+  - check
+
+rust-gate:
+  stage: check
+  image: rust:1.93.0
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+    CARGO_TERM_COLOR: "always"
+  cache:
+    key: "cargo-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - target/
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev >/dev/null
+    - rustup component add rustfmt
+  script:
+    - cargo fmt --all -- --check
+    - cargo check --workspace --all-targets
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
