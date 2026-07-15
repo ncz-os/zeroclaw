@@ -38,11 +38,17 @@ advisory-scan:
     CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
     CARGO_TERM_COLOR: "always"
   cache:
-    key: "cargo-deny-bin"
+    # Bump the cache key suffix (v2, v3, ...) to force a fresh cargo-deny
+    # install after a cargo-deny release that changes advisory semantics,
+    # so an ancient binary never silently lingers past its point of usefulness.
+    key: "cargo-deny-bin-v2"
     paths:
       - .cargo/bin/
   before_script:
-    - cargo deny --version || cargo install cargo-deny --locked
+    - cargo deny --version
+    - |
+      INSTALLED=$(cargo deny --version 2>/dev/null | awk '{print $2}')
+      if [ -z "$INSTALLED" ]; then cargo install cargo-deny --locked; fi
   script:
     - cargo deny check advisories
   rules:
