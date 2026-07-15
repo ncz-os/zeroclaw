@@ -45,10 +45,15 @@ advisory-scan:
     paths:
       - .cargo/bin/
   before_script:
-    - cargo deny --version
     - |
-      INSTALLED=$(cargo deny --version 2>/dev/null | awk '{print $2}')
-      if [ -z "$INSTALLED" ]; then cargo install cargo-deny --locked; fi
+      # Cache-miss safe: the version check is part of an `if !` test, so its
+      # nonzero exit on a missing binary is consumed and never propagates.
+      # If cargo-deny IS present but corrupted, `--force` overwrites it.
+      # Version is pinned to match deny.toml's v2 config schema and the
+      # local dev install; bump both in lockstep when upgrading.
+      if ! cargo deny --version >/dev/null 2>&1; then
+        cargo install cargo-deny --locked --version 0.19.9 --force
+      fi
   script:
     - cargo deny check advisories
   rules:
