@@ -2,16 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::types::{SopRun, SopStepResult};
+use super::engine::now_iso8601;
+use super::types::{SopRun, SopStepResult, SopTriggerSource};
 use zeroclaw_memory::traits::{Memory, MemoryCategory};
 
 const SOP_CATEGORY: &str = "sop";
 
-/// Persists SOP execution runs and step results to the Memory backend.
-///
-/// Storage keys:
-/// - `sop_run_{run_id}` — full `SopRun` JSON (created on start, updated on complete)
-/// - `sop_step_{run_id}_{step_number}` — `SopStepResult` JSON (one per step)
 pub struct SopAuditLogger {
     memory: Arc<dyn Memory>,
 }
@@ -45,6 +41,74 @@ impl SopAuditLogger {
         Ok(())
     }
 
+    /// Log a suspicious but allowed untrusted SOP event.
+    pub async fn log_suspicious_untrusted(
+        &self,
+        source: SopTriggerSource,
+        topic: Option<&str>,
+        patterns: &[String],
+        score: f64,
+    ) -> Result<()> {
+        let now = now_iso8601();
+        let key = event_key("suspicious_untrusted", &now);
+        let content = serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "suspicious_untrusted",
+            "source": source,
+            "topic": topic,
+            "patterns": patterns,
+            "score": score,
+            "timestamp": now,
+        }))?;
+        self.memory.store(&key, &content, category(), None).await?;
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "source": source,
+                    "topic": topic,
+                    "patterns": patterns,
+                    "score": score,
+                })),
+            "SOP audit: suspicious untrusted trigger content allowed"
+        );
+        Ok(())
+    }
+
+    /// Log a blocked unsafe SOP event.
+    pub async fn log_blocked_unsafe(
+        &self,
+        sop_name: Option<&str>,
+        source: SopTriggerSource,
+        topic: Option<&str>,
+        reason: &str,
+    ) -> Result<()> {
+        let now = now_iso8601();
+        let key = event_key("blocked_unsafe", &now);
+        let content = serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "blocked_unsafe",
+            "sop_name": sop_name,
+            "source": source,
+            "topic": topic,
+            "reason": reason,
+            "timestamp": now,
+        }))?;
+        self.memory.store(&key, &content, category(), None).await?;
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "sop_name": sop_name,
+                    "source": source,
+                    "topic": topic,
+                    "reason": reason,
+                })),
+            "SOP audit: blocked unsafe untrusted trigger content"
+        );
+        Ok(())
+    }
+
     /// Log run completion (updates the run record with final state).
     pub async fn log_run_complete(&self, run: &SopRun) -> Result<()> {
         let key = run_key(&run.run_id);
@@ -60,17 +124,6 @@ impl SopAuditLogger {
         );
         Ok(())
     }
-
-    // NOTE (EPIC C): the per-gate approval audit (`log_approval` /
-    // `log_timeout_auto_approve`) was removed. Those wrote last-write-wins Memory
-    // keys (`sop_approval_{run}_{step}` / `sop_timeout_approve_{run}_{step}`, no
-    // who/where, clobbered on re-approval). The audit of record for gate
-    // resolutions is now the append-only run-store event log
-    // (`SopRunStore::append_event`, written inside `engine.resolve_gate` with the
-    // transport-derived principal); read it via `engine.run_events`. The metrics
-    // restart-recovery path (`SopMetricsCollector::rebuild_from_persistence`)
-    // reconstructs the approval / timeout-auto-approval counters from that ledger,
-    // not these keys.
 
     /// Retrieve a stored run by ID (if it exists in memory).
     pub async fn get_run(&self, run_id: &str) -> Result<Option<SopRun>> {
@@ -115,6 +168,15 @@ fn step_key(run_id: &str, step_number: u32) -> String {
     format!("sop_step_{run_id}_{step_number}")
 }
 
+fn event_key(kind: &str, timestamp: &str) -> String {
+    let safe_timestamp: String = timestamp
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    let suffix = rand::random::<u32>();
+    format!("sop_event_{kind}_{safe_timestamp}_{suffix:08x}")
+}
+
 fn category() -> MemoryCategory {
     MemoryCategory::Custom(SOP_CATEGORY.into())
 }
@@ -134,6 +196,7 @@ mod tests {
                 payload: None,
                 timestamp: "2026-02-19T12:00:00Z".into(),
             },
+            frame_marker_id: "marker-test".into(),
             status: SopRunStatus::Running,
             current_step: 1,
             total_steps: 3,
@@ -152,6 +215,7 @@ mod tests {
             output: format!("Step {n} completed"),
             started_at: "2026-02-19T12:00:00Z".into(),
             completed_at: Some("2026-02-19T12:00:05Z".into()),
+            tool_calls: Vec::new(),
         }
     }
 

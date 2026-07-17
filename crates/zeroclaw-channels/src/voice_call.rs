@@ -1,9 +1,4 @@
 //! Real-time voice call channel for Twilio, Telnyx, and Plivo.
-//!
-//! Handles inbound/outbound phone calls with real-time STT/TTS streaming,
-//! call transcription logging, and approval workflows for outbound calls.
-//! Webhook endpoints receive call events from the telephony model_provider and
-//! translate them into `ChannelMessage`s for the agent loop.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -454,16 +449,6 @@ impl Channel for VoiceCallChannel {
             "voice call webhook server starting"
         );
 
-        // The webhook server runs as an axum HTTP server on the configured port.
-        // In production, this handles:
-        // - POST /voice/inbound — Twilio/Telnyx/Plivo call initiation webhook
-        // - POST /voice/status — Call status updates
-        // - POST /voice/transcription — Real-time transcription events
-        // - WebSocket /voice/media — Bidirectional audio streaming
-        //
-        // For now, we set up the server structure. Full endpoint
-        // implementation depends on provider-specific webhook payloads.
-
         let app = axum::Router::new()
             .route("/voice/health", axum::routing::get(|| async { "ok" }))
             .with_state(active_calls);
@@ -548,7 +533,13 @@ impl Channel for VoiceCallChannel {
         Ok(())
     }
 
-    async fn finalize_draft(&self, _recipient: &str, _message_id: &str, _text: &str) -> Result<()> {
+    async fn finalize_draft(
+        &self,
+        _recipient: &str,
+        _message_id: &str,
+        _text: &str,
+        _suppress_voice: bool,
+    ) -> Result<()> {
         Ok(())
     }
 

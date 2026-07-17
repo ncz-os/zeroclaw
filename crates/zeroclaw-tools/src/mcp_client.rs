@@ -1,5 +1,4 @@
 //! MCP (Model Context Protocol) client — connects to external tool servers.
-//!
 //! Supports multiple transports: stdio (spawn local process), HTTP, and SSE.
 
 use std::collections::HashMap;
@@ -121,14 +120,6 @@ impl McpServerCapabilities {
     }
 }
 
-/// Inspect an MCP method `result` for an `isError: true` envelope (HTTP 200 +
-/// error detail in `content[].text`, per the MCP spec) and convert it to an
-/// `Err`. The server-controlled detail is scrubbed for secrets and
-/// length-bounded via `sanitize_api_error` before it reaches logs or the
-/// returned error. Shared by `call_tool` and `dispatch_method`.
-///
-/// `op` is the human-readable operation label (tool name or RPC method) used in
-/// the log line and error message.
 fn check_result_is_error(result: &serde_json::Value, op: &str, server_name: &str) -> Result<()> {
     if result.get("isError").and_then(serde_json::Value::as_bool) != Some(true) {
         return Ok(());
@@ -284,11 +275,6 @@ impl McpServer {
             .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
             .min(MAX_TOOL_TIMEOUT_SECS);
 
-        // Bounded reconnect loop: a stale session (server restart) or a dropped
-        // transport (SSE stream EOF) is recovered by resetting the session and
-        // re-running the handshake, then retrying the call. Genuine tool errors
-        // (including `isError`) and timeouts are surfaced immediately and never
-        // retried.
         let mut attempt = 0u32;
         let resp = loop {
             let id = inner.next_id.fetch_add(1, Ordering::Relaxed);
@@ -464,11 +450,6 @@ impl McpServer {
             bail!("MCP `{rpc_method}` error {}: {}", err.code, err.message);
         }
         let result = resp.result.unwrap_or(serde_json::Value::Null);
-        // Surface MCP `result.isError: true` envelopes (HTTP 200 + error detail
-        // in `content[].text`) the same way `call_tool` does, with the detail
-        // scrubbed and length-bounded. resources/* and prompts/* can return
-        // these envelopes per the MCP spec, so the dispatch path must honor them
-        // instead of handing the model an error envelope dressed as success.
         check_result_is_error(&result, rpc_method, &inner.config.name)?;
         Ok(result)
     }
@@ -917,6 +898,7 @@ mod tests {
     async fn connect_nonexistent_command_fails_cleanly() {
         // A command that doesn't exist should fail at spawn, not panic.
         let config = McpServerConfig {
+            pinned_resources: Vec::new(),
             name: "nonexistent".to_string(),
             command: "/usr/bin/this_binary_does_not_exist_zeroclaw_test".to_string(),
             args: vec![],
@@ -936,6 +918,7 @@ mod tests {
     async fn connect_all_nonfatal_on_single_failure() {
         // If one server config is bad, connect_all should succeed (with 0 servers).
         let configs = vec![McpServerConfig {
+            pinned_resources: Vec::new(),
             name: "bad".to_string(),
             command: "/usr/bin/does_not_exist_zc_test".to_string(),
             args: vec![],
@@ -955,6 +938,7 @@ mod tests {
     #[test]
     fn http_transport_requires_url() {
         let config = McpServerConfig {
+            pinned_resources: Vec::new(),
             name: "test".into(),
             transport: McpTransport::Http,
             ..Default::default()
@@ -1025,13 +1009,6 @@ mod tests {
         assert_eq!(registry.tool_count(), 0);
         assert!(registry.is_empty());
     }
-
-    // ── McpServer::call_tool isError handling ──────────────────────────────
-    //
-    // These exercise the `result.isError == true` branch added to the
-    // *inherent* `McpServer::call_tool` (the one that talks to the transport,
-    // not the `McpRegistry::call_tool` wrapper). A fake transport returns a
-    // canned result so no live server is needed.
 
     /// Transport that ignores the request and always returns one preset result.
     struct FakeTransport {
@@ -1309,6 +1286,7 @@ done
         std::fs::set_permissions(&server_path, perms).expect("chmod");
 
         let config = McpServerConfig {
+            pinned_resources: Vec::new(),
             name: "echo".to_string(),
             command: server_path.display().to_string(),
             args: vec![pid_path.display().to_string()],

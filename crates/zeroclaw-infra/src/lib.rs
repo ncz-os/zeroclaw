@@ -1,5 +1,4 @@
 //! Channel infrastructure: session backends, debouncing, and stall watchdog.
-//!
 //! These are cross-cutting utilities used by multiple channel implementations.
 
 pub mod acp_session_store;

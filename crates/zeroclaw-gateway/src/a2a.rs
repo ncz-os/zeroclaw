@@ -1,28 +1,8 @@
 //! A2A discovery surface: the well-known catalog card and per-alias agent
 //! cards.
-//!
-//! A2A (Agent2Agent, Linux Foundation) assumes one agent per origin: a single
-//! spec-conforming `AgentCard` at `/.well-known/agent-card.json`. ZeroClaw
-//! hosts N agents per install, so the origin root serves a ZeroClaw discovery
-//! catalog card aggregating every published agent's exposed skills (each
-//! tagged with its owning alias) and enumerating each one's per-alias endpoint
-//! and card URL. The catalog card is NOT a runnable A2A agent; each published
-//! alias is, at its own endpoint.
-//!
-//! Cards are built on demand from the canonical `[agents.<alias>]` config (no
-//! stored second agent list). Skills resolve through the same `SkillsService`
-//! the dashboard uses, then narrow through the alias's `exposed_skills`
-//! filter; the skill bundles stay the single source of truth.
-//!
-//! The card types here are serde-native and serialize to the A2A v1.0
-//! protobuf-JSON wire shape. We roll them ourselves rather than depend on
-//! `a2a-rs`, whose `AgentCard` is a one-agent-per-origin protobuf type and
-//! pulls a ConnectRPC/prost/protoc build footprint that fights the
-//! single-static-binary directive. The vendored proto at
-//! `tests/fixtures/a2a-v1.proto` is the conformance reference.
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -42,12 +22,6 @@ use crate::{AppState, api::require_auth, run_gateway_chat_with_tools};
 const A2A_PROTOCOL_VERSION: &str = "1.0";
 /// JSON-RPC is the spec-mandated baseline transport binding.
 const A2A_PROTOCOL_BINDING: &str = "JSONRPC";
-/// ZeroClaw catalog discovery path. Deliberately NOT the spec's singular
-/// `agent-card.json`: the spec assumes one agent per origin and a catalog is
-/// not a conforming agent card, so squatting the spec path with a catalog body
-/// would mislead a standard client into parsing it as an agent. The plural
-/// path makes the non-conformance explicit. Per-alias cards (which ARE
-/// conforming) use the singular spec path under their own base.
 const CATALOG_CARD_PATH: &str = "/.well-known/agents-card.json";
 /// Prefixed alias of the catalog under the `/a2a/` namespace, serving the same
 /// card so the whole A2A surface lives under one prefix while the root path
@@ -106,12 +80,27 @@ pub struct AgentCard {
     pub skills: Vec<AgentSkill>,
 }
 
-/// Resolve the externally advertised base URL for endpoint fields. Precedence:
-/// the operator-set `public_base_url`; then an explicit A2A `bind`/`port`
-/// advertise-only override; then the gateway's own host and port (the routes
-/// serve on the gateway listener, so this is the real reachable origin). A
-/// partial override fills the missing half from the gateway config.
-fn advertised_base(config: &Config) -> String {
+/// Runtime gateway endpoint used for A2A advertisement when the operator starts
+/// the gateway with CLI host/port overrides. This is created from the listener
+/// inputs at route construction time; persistent config remains the source of
+/// truth for config-defined URLs and explicit A2A advertisement overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdvertisedGatewayEndpoint {
+    host: String,
+    port: u16,
+}
+
+impl AdvertisedGatewayEndpoint {
+    #[must_use]
+    pub(crate) fn new(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port,
+        }
+    }
+}
+
+fn advertised_base(config: &Config, endpoint: Option<&AdvertisedGatewayEndpoint>) -> String {
     let server = &config.a2a.server;
     let configured = server.public_base_url.trim();
     if !configured.is_empty() {
@@ -120,8 +109,12 @@ fn advertised_base(config: &Config) -> String {
     let host = server
         .bind
         .clone()
+        .or_else(|| endpoint.map(|endpoint| endpoint.host.clone()))
         .unwrap_or_else(|| config.gateway.host.clone());
-    let port = server.port.unwrap_or(config.gateway.port);
+    let port = server
+        .port
+        .or_else(|| endpoint.map(|endpoint| endpoint.port))
+        .unwrap_or(config.gateway.port);
     format!("http://{host}:{port}")
 }
 
@@ -136,7 +129,15 @@ fn alias_base_path(alias: &str) -> String {
 /// `catalog` interface and carries no skills of its own.
 #[must_use]
 pub fn build_catalog_card(config: &Config) -> AgentCard {
-    let base = advertised_base(config);
+    build_catalog_card_with_endpoint(config, None)
+}
+
+#[must_use]
+pub(crate) fn build_catalog_card_with_endpoint(
+    config: &Config,
+    endpoint: Option<&AdvertisedGatewayEndpoint>,
+) -> AgentCard {
+    let base = advertised_base(config, endpoint);
     let published = published_aliases(config);
 
     let mut supported_interfaces = Vec::with_capacity(published.len() + 1);
@@ -188,12 +189,21 @@ pub fn build_catalog_card(config: &Config) -> AgentCard {
 /// narrow through `exposed_skills`.
 #[must_use]
 pub fn build_agent_card(config: &Config, alias: &str) -> Option<AgentCard> {
+    build_agent_card_with_endpoint(config, alias, None)
+}
+
+#[must_use]
+pub(crate) fn build_agent_card_with_endpoint(
+    config: &Config,
+    alias: &str,
+    endpoint: Option<&AdvertisedGatewayEndpoint>,
+) -> Option<AgentCard> {
     let agent = config.agents.get(alias)?;
     if !agent.enabled || !agent.a2a.published {
         return None;
     }
 
-    let base = advertised_base(config);
+    let base = advertised_base(config, endpoint);
     let endpoint = format!("{base}{}", alias_base_path(alias));
 
     AgentCard {
@@ -229,11 +239,6 @@ fn published_aliases(config: &Config) -> Vec<String> {
     out
 }
 
-/// One-line agent description for the card. Prefers the alias identity
-/// document (AIEOS `identity.bio`, falling back to a name line) so an
-/// operator-authored identity supersedes the neutral default. Falls back to
-/// `ZeroClaw agent '<alias>'.` when no identity is configured or it fails to
-/// load. The result is collapsed to a single line.
 fn agent_description(config: &Config, alias: &str) -> String {
     if let Some(desc) = identity_description(config, alias) {
         return desc;
@@ -325,24 +330,28 @@ fn exposed_skills(config: &Config, alias: &str) -> Vec<AgentSkill> {
 }
 
 /// `GET /.well-known/agents-card.json` — the discovery catalog card.
-async fn handle_catalog_card(State(state): State<AppState>) -> impl IntoResponse {
+async fn handle_catalog_card(
+    State(state): State<AppState>,
+    Extension(endpoint): Extension<Option<AdvertisedGatewayEndpoint>>,
+) -> impl IntoResponse {
     let config = state.config.read().clone();
     if !config.a2a.server.enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
-    Json(build_catalog_card(&config)).into_response()
+    Json(build_catalog_card_with_endpoint(&config, endpoint.as_ref())).into_response()
 }
 
 /// `GET /a2a/{alias}/.well-known/agent-card.json` — a per-alias agent card.
 async fn handle_alias_card(
     State(state): State<AppState>,
+    Extension(endpoint): Extension<Option<AdvertisedGatewayEndpoint>>,
     axum::extract::Path(alias): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let config = state.config.read().clone();
     if !config.a2a.server.enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match build_agent_card(&config, &alias) {
+    match build_agent_card_with_endpoint(&config, &alias, endpoint.as_ref()) {
         Some(card) => Json(card).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -431,12 +440,6 @@ fn jsonrpc_error(id: serde_json::Value, code: i64, message: &str) -> serde_json:
     })
 }
 
-/// `POST /a2a/{alias}` — A2A JSON-RPC task endpoint. Runs one agent turn for a
-/// `message/send` call and returns a completed `Task` with the reply as an
-/// artifact. Requires a paired bearer token (a turn is tool-enabled, so it is
-/// never served unauthenticated), then gated on `[a2a.server] enabled` and the
-/// alias being published. The discovery cards are intentionally unauthenticated
-/// so peers can read the published surface before pairing; invocation is not.
 async fn handle_alias_task(
     State(state): State<AppState>,
     axum::extract::Path(alias): axum::extract::Path<String>,
@@ -577,14 +580,15 @@ async fn handle_alias_task(
     }
 }
 
-/// A2A discovery routes. The server-enabled gate is enforced per request (so a
-/// runtime config reload toggles it without a router rebuild); the routes are
-/// always mounted but answer 404 while disabled.
-///
-/// These are fast, read-only card lookups and belong under the standard
-/// gateway timeout. The synchronous task endpoint lives in
-/// [`a2a_task_route`] so it can opt into the long-running timeout.
 pub fn a2a_routes() -> Router<AppState> {
+    a2a_routes_with_endpoint(None)
+}
+
+/// A2A discovery routes using the runtime listener endpoint for URL
+/// advertisement when config does not set a stronger override.
+pub(crate) fn a2a_routes_with_endpoint(
+    endpoint: Option<AdvertisedGatewayEndpoint>,
+) -> Router<AppState> {
     Router::new()
         .route(CATALOG_CARD_PATH, get(handle_catalog_card))
         .route(CATALOG_CARD_PREFIXED_PATH, get(handle_catalog_card))
@@ -592,13 +596,9 @@ pub fn a2a_routes() -> Router<AppState> {
             &format!("/a2a/{{alias}}{WELL_KNOWN_AGENT_CARD_PATH}"),
             get(handle_alias_card),
         )
+        .layer(Extension(endpoint))
 }
 
-/// The A2A `message/send` task endpoint. `handle_alias_task` runs a full agent
-/// turn inline through `run_gateway_chat_with_tools`, so this route must sit on
-/// the long-running timeout router (like manual cron triggers), not the 30s
-/// gateway-wide limit, or any non-trivial turn is cut off at
-/// `request_timeout_secs`.
 pub fn a2a_task_route() -> Router<AppState> {
     Router::new().route("/a2a/{alias}", post(handle_alias_task))
 }
@@ -797,13 +797,52 @@ mod tests {
     }
 
     #[test]
+    fn runtime_gateway_endpoint_supersedes_config_gateway_port_when_unset() {
+        let mut config = config_with_published_alias("researcher", true);
+        config.gateway.host = "127.0.0.1".into();
+        config.gateway.port = 42617;
+        let endpoint = AdvertisedGatewayEndpoint::new("127.0.0.1", 42629);
+
+        let catalog = build_catalog_card_with_endpoint(&config, Some(&endpoint));
+        assert_eq!(
+            catalog.supported_interfaces[0].url,
+            "http://127.0.0.1:42629/.well-known/agents-card.json"
+        );
+        assert_eq!(
+            catalog.supported_interfaces[1].url,
+            "http://127.0.0.1:42629/a2a/researcher"
+        );
+
+        let agent = build_agent_card_with_endpoint(&config, "researcher", Some(&endpoint))
+            .expect("published agent card");
+        assert_eq!(
+            agent.supported_interfaces[0].url,
+            "http://127.0.0.1:42629/a2a/researcher"
+        );
+    }
+
+    #[test]
+    fn public_base_url_overrides_runtime_gateway_endpoint() {
+        let mut config = config_with_published_alias("researcher", true);
+        config.a2a.server.public_base_url = "https://agents.example.com/".into();
+        let endpoint = AdvertisedGatewayEndpoint::new("127.0.0.1", 42629);
+
+        let card = build_catalog_card_with_endpoint(&config, Some(&endpoint));
+        assert_eq!(
+            card.supported_interfaces[0].url,
+            "https://agents.example.com/.well-known/agents-card.json"
+        );
+    }
+
+    #[test]
     fn a2a_port_override_supersedes_gateway_port() {
         let mut config = config_with_published_alias("researcher", true);
         config.gateway.host = "127.0.0.1".into();
         config.gateway.port = 42617;
         config.a2a.server.bind = Some("0.0.0.0".into());
         config.a2a.server.port = Some(9000);
-        let card = build_catalog_card(&config);
+        let endpoint = AdvertisedGatewayEndpoint::new("127.0.0.1", 42629);
+        let card = build_catalog_card_with_endpoint(&config, Some(&endpoint));
         assert_eq!(
             card.supported_interfaces[0].url,
             "http://0.0.0.0:9000/.well-known/agents-card.json"

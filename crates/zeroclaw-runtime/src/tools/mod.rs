@@ -1,19 +1,4 @@
 //! Tool subsystem for agent-callable capabilities.
-//!
-//! This module implements the tool execution surface exposed to the LLM during
-//! agentic loops. Each tool implements the [`Tool`] trait defined in the
-//! `traits` submodule, which requires a name, description, JSON parameter
-//! schema, and an async `execute` method returning a structured [`ToolResult`].
-//!
-//! Tools are assembled into registries by [`default_tools`] (shell, file read/write)
-//! and [`all_tools`] (full set including memory, browser, cron, HTTP, delegation,
-//! and optional integrations). Security policy enforcement is injected via
-//! [`SecurityPolicy`] at construction time.
-//!
-//! # Extension
-//!
-//! To add a new tool, implement [`Tool`] in a new submodule and register it in
-//! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
 pub mod attribution;
 pub mod cron_add;
@@ -26,8 +11,10 @@ pub mod cron_update;
 pub mod delegate;
 pub mod file_read;
 pub mod model_switch;
+pub mod param_options;
 pub mod read_skill;
 pub mod schedule;
+pub mod scoped;
 pub mod security_ops;
 pub mod send_message_to_peer;
 pub mod shell;
@@ -39,7 +26,9 @@ pub mod sop_approve;
 pub mod sop_execute;
 pub mod sop_list;
 pub mod sop_status;
+pub mod sop_workshop;
 pub mod spawn_subagent;
+pub mod todo_write;
 pub mod verifiable_intent;
 
 // Tool types from zeroclaw-tools (direct imports, no shims)
@@ -72,6 +61,7 @@ pub use zeroclaw_tools::file_upload::FileUploadTool;
 pub use zeroclaw_tools::file_upload_bundle::FileUploadBundleTool;
 pub use zeroclaw_tools::file_write::FileWriteTool;
 pub use zeroclaw_tools::gemini_cli::GeminiCliTool;
+pub use zeroclaw_tools::git_forge::GitForgeTool;
 pub use zeroclaw_tools::git_operations::GitOperationsTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
 pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
@@ -86,9 +76,10 @@ pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
 pub use zeroclaw_tools::linkedin::LinkedInTool;
 pub use zeroclaw_tools::llm_task::LlmTaskTool;
 pub use zeroclaw_tools::mcp_client::McpRegistry;
+pub use zeroclaw_tools::mcp_context;
 pub use zeroclaw_tools::mcp_deferred::{
     ActivatedToolSet, DeferredMcpToolSet, build_deferred_tools_section,
-    build_deferred_tools_section_filtered,
+    build_deferred_tools_section_excluding, build_deferred_tools_section_filtered,
 };
 pub use zeroclaw_tools::mcp_prompts_tool::McpPromptsTool;
 pub use zeroclaw_tools::mcp_resources_tool::McpResourcesTool;
@@ -102,8 +93,6 @@ pub use zeroclaw_tools::microsoft365::Microsoft365Tool;
 pub use zeroclaw_tools::model_routing_config::ModelRoutingConfigTool;
 pub use zeroclaw_tools::notion_tool::NotionTool;
 pub use zeroclaw_tools::opencode_cli::OpenCodeCliTool;
-#[cfg(feature = "rag-pdf")]
-pub use zeroclaw_tools::pdf_read::PdfReadTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::project_intel::ProjectIntelTool;
@@ -112,6 +101,9 @@ pub use zeroclaw_tools::pushover::PushoverTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
 pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
 pub use zeroclaw_tools::screenshot::ScreenshotTool;
+pub use zeroclaw_tools::send_via::{
+    AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
+};
 pub use zeroclaw_tools::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
@@ -125,7 +117,7 @@ pub use zeroclaw_tools::wrappers::{PathGuardedTool, RateLimitedTool};
 
 // Traits from zeroclaw-api
 pub use zeroclaw_api::schema::{CleaningStrategy, SchemaCleanr};
-pub use zeroclaw_api::tool::{Tool, ToolResult, ToolSpec};
+pub use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};
 
 // Local tool re-exports (tools with root deps, kept in misc)
 pub use cron_add::CronAddTool;
@@ -149,7 +141,9 @@ pub use sop_approve::SopApproveTool;
 pub use sop_execute::SopExecuteTool;
 pub use sop_list::SopListTool;
 pub use sop_status::SopStatusTool;
+pub use sop_workshop::SopWorkshopTool;
 pub use spawn_subagent::SpawnSubagentTool;
+pub use todo_write::TodoWriteTool;
 pub use verifiable_intent::VerifiableIntentTool;
 
 /// Re-entrant agent-spawning tools that must never be collapsed by the
@@ -169,11 +163,6 @@ use std::sync::{Arc, Mutex};
 use zeroclaw_config::schema::{AliasedAgentConfig, Config};
 use zeroclaw_memory::Memory;
 
-/// Per-tool channel-map handle — `Arc<RwLock<HashMap<channel_name, channel>>>`.
-///
-/// Each channel-driven tool owns its own handle so callers can populate it
-/// independently (late-bound registration). Shared alias of the same
-/// underlying type formerly known as `ChannelMapHandle`.
 pub type PerToolChannelHandle =
     Arc<RwLock<HashMap<String, Arc<dyn zeroclaw_api::channel::Channel>>>>;
 
@@ -197,6 +186,14 @@ impl Tool for ArcToolRef {
 
     fn parameters_schema(&self) -> serde_json::Value {
         self.0.parameters_schema()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.0.output_schema()
+    }
+
+    fn param_domains(&self) -> Vec<(&'static str, ::zeroclaw_api::tool::OptionDomain)> {
+        self.0.param_domains()
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -236,6 +233,14 @@ impl Tool for ArcDelegatingTool {
 
     fn parameters_schema(&self) -> serde_json::Value {
         self.inner.parameters_schema()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.inner.output_schema()
+    }
+
+    fn param_domains(&self) -> Vec<(&'static str, ::zeroclaw_api::tool::OptionDomain)> {
+        self.inner.param_domains()
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -298,11 +303,6 @@ pub fn default_tools_with_runtime(
     ]
 }
 
-/// Register skill-defined tools into an existing tool registry.
-///
-/// Converts each skill's `[[tools]]` entries into callable `Tool` implementations
-/// and appends them to the registry. Skill tools that would shadow a built-in tool
-/// name are skipped with a warning.
 pub fn register_skill_tools(
     tools_registry: &mut Vec<Box<dyn Tool>>,
     skills: &[crate::skills::Skill],
@@ -312,7 +312,6 @@ pub fn register_skill_tools(
 }
 
 /// Register skill-defined tools with full context for builtin kinds.
-///
 /// `unfiltered_registry` provides the pre-policy tool list for `kind = "builtin"`
 /// delegation.
 pub fn register_skill_tools_with_context(
@@ -342,6 +341,7 @@ pub fn register_skill_tools_with_context_and_runtime(
     }
 
     let before = tools_registry.len();
+    let policy = Arc::clone(&security);
     let skill_tools = crate::skills::skills_to_tools_with_context_and_runtime(
         skills,
         security,
@@ -363,17 +363,21 @@ pub fn register_skill_tools_with_context_and_runtime(
                     tool.name()
                 )
             );
+        } else if policy.is_tool_excluded(tool.name()) {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                &format!(
+                    "Skill tool '{}' denied by excluded_tools, skipping",
+                    tool.name()
+                )
+            );
         } else {
             tools_registry.push(tool);
         }
     }
     let registered = tools_registry.len() - before;
 
-    // Positive-path log — matches how the rest of zeroclaw reports
-    // successful initialization (open-skills clone, daemon startup,
-    // gateway bind, etc.). Without this, a skill that audited clean,
-    // parsed cleanly, and registered N tools leaves zero signal in the
-    // log, which makes SKILL.toml / SKILL.md authoring painful to debug.
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
@@ -390,15 +394,6 @@ pub fn register_skill_tools_with_context_and_runtime(
     );
 }
 
-/// Build resolution-only MCP tool wrappers for skill MCP elevation
-/// (`kind = "mcp"`).
-///
-/// These wrappers are **not** added to the model-visible tool registry — they
-/// exist solely so a skill MCP elevation can resolve its `target`
-/// (`{server}__{tool}`, e.g. `images__generate`) by name at registration time
-/// and delegate to it. Cheap: MCP tool definitions are cached at connect time,
-/// so this performs no network I/O. Returned alongside the built-in
-/// `unfiltered_tool_arcs` to form the skill resolution registry.
 pub async fn collect_mcp_elevation_arcs(registry: &Arc<McpRegistry>) -> Vec<Arc<dyn Tool>> {
     let mut arcs: Vec<Arc<dyn Tool>> = Vec::new();
     for name in registry.tool_names() {
@@ -432,12 +427,6 @@ pub fn build_mcp_capability_tools(
     out
 }
 
-/// Always-on built-in tools that surface in the integrations panel as
-/// `(display_name, description)` pairs. The integrations registry consumes
-/// this verbatim — adding a new always-on built-in is one row here, no
-/// edit to the registry. Tools with a config struct (Browser, Cron,
-/// GoogleWorkspace) declare themselves via the `#[integration(...)]`
-/// attribute on the schema struct instead.
 pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
     ("Shell", "Terminal command execution"),
     ("File System", "Read/write files"),
@@ -449,7 +438,6 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
 ];
 
 /// Bundled return values from tool registry construction.
-///
 /// Named struct to avoid an ever-growing positional tuple that's painful
 /// to destructure across many callers.
 #[allow(clippy::type_complexity)]
@@ -512,7 +500,22 @@ pub fn all_tools(
         tui_env,
         None,
         None,
+        None,
     )
+}
+
+/// Peer groups that include `agent_alias`, cloned from `config`. Used as the
+/// live resolver body for `send_via` authority (and the snapshot fallback).
+fn filter_agent_peer_groups(
+    config: &Config,
+    agent_alias: &str,
+) -> HashMap<String, zeroclaw_config::multi_agent::PeerGroupConfig> {
+    config
+        .peer_groups
+        .iter()
+        .filter(|(_, pg)| pg.agents.iter().any(|a| a.as_str() == agent_alias))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// Create full tool registry including memory tools and optional Composio.
@@ -542,6 +545,10 @@ pub fn all_tools_with_runtime(
     tui_env: Option<HashMap<String, String>>,
     sop_engine: Option<Arc<Mutex<SopEngine>>>,
     sop_audit: Option<Arc<SopAuditLogger>>,
+    // Live config handle for `send_via` peer-group authority. `Some` from the
+    // channel daemon (so reloads take effect); `None` for one-shot / non-channel
+    // callers, which fall back to a snapshot of `root_config`.
+    live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
 ) -> AllToolsResult {
     let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
@@ -649,6 +656,7 @@ pub fn all_tools_with_runtime(
         Arc::new(CalculatorTool::new()),
         Arc::new(WeatherTool::new()),
         Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
+        Arc::new(TodoWriteTool::new()),
     ];
 
     // A SubAgent runs as an ephemeral clone of its parent and inherits the
@@ -663,11 +671,6 @@ pub fn all_tools_with_runtime(
     // bot/server set); the search tool reads from a shared archive DB
     // so it's enabled when at least one alias archives.
     if root_config.channels.discord.values().any(|d| d.archive) {
-        // Read from the SHARED store (`config.data_dir`) the channel archive
-        // writer persists to (orchestrator builds `discord.db` under
-        // `&config.data_dir`), NOT the per-agent `workspace_dir` — otherwise the
-        // tool opens an empty DB and litters a stray `memory/discord.db` under
-        // every agent workspace.
         match zeroclaw_memory::SqliteMemory::new_named("sqlite", &config.data_dir, "discord") {
             Ok(discord_mem) => {
                 tool_arcs.push(Arc::new(DiscordSearchTool::new(Arc::new(discord_mem))));
@@ -738,7 +741,7 @@ pub fn all_tools_with_runtime(
     }
 
     if matches!(
-        root_config.skills.prompt_injection_mode,
+        root_config.effective_skills_prompt_mode(agent_alias),
         zeroclaw_config::schema::SkillsPromptInjectionMode::Compact
     ) {
         // ReadSkillTool now holds full config to support all skill sources:
@@ -875,11 +878,25 @@ pub fn all_tools_with_runtime(
 
     // Text browser tool (headless text-based browser rendering)
     if root_config.text_browser.enabled {
-        tool_arcs.push(Arc::new(TextBrowserTool::new(
+        match TextBrowserTool::new_with_private_hosts(
             security.clone(),
             root_config.text_browser.preferred_browser.clone(),
             root_config.text_browser.timeout_secs,
-        )));
+            root_config.text_browser.allowed_private_hosts.clone(),
+        ) {
+            Ok(tool) => {
+                tool_arcs.push(Arc::new(tool));
+            }
+            Err(e) => {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "text_browser: failed to construct tool, skipping registration"
+                );
+            }
+        }
     }
 
     // Web search tool (enabled by default for GLM and other models)
@@ -1078,13 +1095,6 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    // PDF extraction (feature-gated at compile time via rag-pdf)
-    #[cfg(feature = "rag-pdf")]
-    tool_arcs.push(Arc::new(RateLimitedTool::new(
-        PathGuardedTool::new(PdfReadTool::new(security.clone()), security.clone()),
-        security.clone(),
-    )));
-
     // Vision tools are always available
     tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
     tool_arcs.push(Arc::new(RateLimitedTool::new(
@@ -1111,13 +1121,6 @@ pub fn all_tools_with_runtime(
             security.clone(),
         )));
         tool_arcs.push(Arc::new(SessionsSendTool::new(backend, security.clone())));
-        // NOTE: SessionResetTool and SessionDeleteTool are available via
-        // zeroclaw_tools::sessions but NOT registered by default. They are
-        // destructive operations (clear/delete conversation history) and
-        // should only be enabled by callers that explicitly need them
-        // (e.g., orchestration dashboards). Agent-callable registrations must
-        // use SessionOwnershipScope so one agent cannot reset/delete another
-        // agent's sessions. The unscoped constructors are operator/admin only.
     }
 
     // LinkedIn integration (config-gated)
@@ -1211,6 +1214,12 @@ pub fn all_tools_with_runtime(
             SopStatusTool::new(Arc::clone(sop_engine))
                 .with_collector(crate::sop::SopMetricsCollector::shared()),
         ));
+        if root_config.sop.procedural_memory_enabled {
+            tool_arcs.push(Arc::new(SopWorkshopTool::new(
+                Arc::clone(sop_engine),
+                workspace_dir.to_path_buf(),
+            )));
+        }
     }
 
     if let Some(key) = composio_key
@@ -1228,6 +1237,12 @@ pub fn all_tools_with_runtime(
     let reaction_tool = ReactionTool::new(security.clone(), Arc::clone(&reaction_handle));
     tool_arcs.push(Arc::new(reaction_tool));
 
+    // Unified forge operations tool, routes through the git channel via the
+    // same late-bound channel map as the reaction tool. Resource/action grid
+    // plus a raw catch-all over the channel's single forge_request transport.
+    let git_forge_tool = GitForgeTool::new(security.clone(), Arc::clone(&reaction_handle));
+    tool_arcs.push(Arc::new(git_forge_tool));
+
     // Channel room-management tool — always registered; owns its own late-bound channel map.
     let channel_room_handle: Option<PerToolChannelHandle> =
         Some(Arc::new(RwLock::new(HashMap::new())));
@@ -1242,6 +1257,21 @@ pub fn all_tools_with_runtime(
     let ask_user_tool =
         AskUserTool::new(security.clone(), ask_user_handle.as_ref().cloned().unwrap());
     tool_arcs.push(Arc::new(ask_user_tool));
+
+    {
+        let agent_peer_groups: AgentPeerGroupResolver = if let Some(live) = live_config.clone() {
+            let alias = agent_alias.to_string();
+            Arc::new(move || filter_agent_peer_groups(&live.read(), &alias))
+        } else {
+            let snapshot = filter_agent_peer_groups(root_config, agent_alias);
+            Arc::new(move || snapshot.clone())
+        };
+        tool_arcs.push(Arc::new(SendViaTool::new(
+            security.clone(),
+            ask_user_handle.as_ref().cloned().unwrap(),
+            agent_peer_groups,
+        )));
+    }
 
     // Human escalation tool — always registered; owns its own late-bound channel map.
     let escalate_handle: Option<PerToolChannelHandle> = Some(Arc::new(RwLock::new(HashMap::new())));
@@ -1385,13 +1415,6 @@ pub fn all_tools_with_runtime(
         .with_workspace_dir(workspace_dir.to_path_buf())
         .with_memory(memory.clone())
         .with_providers_models({
-            // DelegateTool's signature still expects the flat HashMap shape;
-            // collapse the typed ModelProviders container down to base-config
-            // entries here. Family-specific extras (wire_api / requires_openai_auth /
-            // resource / etc.) aren't needed by DelegateTool — it only resolves
-            // baseline fields (model, api_key, uri) for sub-agent dispatch.
-            // Phase 7 will switch DelegateTool to consume Arc<ModelProviders>
-            // directly and drop this collapse.
             let mut m: std::collections::HashMap<
                 String,
                 std::collections::HashMap<String, zeroclaw_config::schema::ModelProviderConfig>,
@@ -1442,15 +1465,17 @@ pub fn all_tools_with_runtime(
                 Ok(host) => {
                     let details = host.tool_plugin_details();
                     let count = details.len();
+                    let plugin_limits = zeroclaw_plugins::component::PluginLimits {
+                        call_fuel: config.plugins.limits.call_fuel,
+                        max_memory_bytes: config
+                            .plugins
+                            .limits
+                            .max_memory_mb
+                            .saturating_mul(1024 * 1024),
+                        max_table_elements: config.plugins.limits.max_table_elements,
+                        max_instances: config.plugins.limits.max_instances,
+                    };
                     for (manifest, wasm_path) in details {
-                        // SSOT: `config` is the snapshot the whole tool set is
-                        // built from, identical to every other tool here. A
-                        // config reload tears down and rebuilds the daemon
-                        // iteration (rpc ConfigReload -> reload_tx), so the
-                        // agent and its tools are reconstructed from the new
-                        // Config; plugin config is never hot-swapped into a live
-                        // WasmTool. The owned map below is that fresh snapshot,
-                        // not a second source of truth.
                         let plugin_config = config
                             .plugins
                             .entry_config(&manifest.name)
@@ -1462,6 +1487,7 @@ pub fn all_tools_with_runtime(
                             manifest.name.clone(),
                             manifest.description.clone().unwrap_or_default(),
                             plugin_config,
+                            plugin_limits,
                         )));
                     }
                     ::zeroclaw_log::record!(
@@ -1562,9 +1588,6 @@ mod tests {
         assert_eq!(tools.len(), 6);
     }
 
-    /// Regression: SOP tools must NOT appear in the tool registry when the
-    /// engine handle is not provided (i.e. no `sops_dir` configured).
-    /// Proves the production gating path at `all_tools_with_runtime`.
     #[test]
     fn sop_tools_absent_when_engine_not_provided() {
         let tmp = TempDir::new().unwrap();
@@ -1622,9 +1645,6 @@ mod tests {
         }
     }
 
-    /// SOP tools MUST appear in the tool registry when an engine handle is
-    /// provided, regardless of config. Proves the parameter-passing path
-    /// works end-to-end.
     #[test]
     fn sop_tools_present_when_engine_provided() {
         let tmp = TempDir::new().unwrap();
@@ -1671,6 +1691,7 @@ mod tests {
             None,
             Some(engine),
             None,
+            None,
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -1688,12 +1709,69 @@ mod tests {
                 "SOP tool '{name}' must be registered when engine is provided"
             );
         }
+        assert!(
+            !names.contains(&"sop_workshop"),
+            "sop_workshop must stay opt-in while procedural memory is disabled"
+        );
     }
 
-    /// Regression for #6687: two tool registries built from clones of the same
-    /// engine `Arc` must reference the same underlying `SopEngine`. This is the
-    /// property the daemon relies on so MQTT-triggered runs are visible to
-    /// `sop_status`/`sop_approve`/`sop_advance` invoked from agent sessions.
+    #[test]
+    fn sop_workshop_registered_only_when_procedural_memory_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: false,
+            allowed_domains: vec![],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.sop.procedural_memory_enabled = true;
+
+        let engine = Arc::new(Mutex::new(SopEngine::new(
+            zeroclaw_config::schema::SopConfig::default(),
+        )));
+
+        let tools = all_tools_with_runtime(
+            Arc::new(Config::default()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        assert!(
+            names.contains(&"sop_workshop"),
+            "sop_workshop must be registered when procedural memory is enabled"
+        );
+    }
+
     #[test]
     fn shared_sop_engine_arc_is_observed_by_multiple_registrations() {
         let tmp = TempDir::new().unwrap();
@@ -1740,6 +1818,7 @@ mod tests {
             None,
             Some(shared_engine.clone()),
             Some(shared_audit.clone()),
+            None,
         );
         let session_b = all_tools_with_runtime(
             Arc::new(Config::default()),
@@ -1762,6 +1841,7 @@ mod tests {
             None,
             Some(shared_engine.clone()),
             Some(shared_audit.clone()),
+            None,
         );
 
         for tools in [&session_a.tools, &session_b.tools] {
@@ -1775,13 +1855,6 @@ mod tests {
         assert!(Arc::strong_count(&shared_audit) >= 3);
     }
 
-    /// Regression: `discord_search` and the `sessions_*` tools must open their
-    /// SQLite stores under the SHARED `config.data_dir` (where the channel
-    /// orchestrator / gateway WRITE them), not the per-agent `workspace_dir`.
-    /// Reading the per-agent dir made the tools see empty DBs and litter a
-    /// stray `memory/discord.db` + `sessions/sessions.db` into every agent
-    /// workspace. With `data_dir` and `workspace_dir` deliberately distinct,
-    /// nothing must be created under the workspace.
     #[test]
     fn shared_store_tools_open_data_dir_not_per_agent_workspace() {
         let tmp = TempDir::new().unwrap();
@@ -1842,6 +1915,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .tools;
 
@@ -1868,9 +1942,6 @@ mod tests {
         );
     }
 
-    /// Regression for #6687 blocker: a config with `sop.sops_dir` set but no
-    /// `agents.default` must not fail SOP engine construction. The per-agent
-    /// paths now use `agent_alias` instead of the hardcoded `"default"` string.
     #[tokio::test]
     async fn sop_audit_memory_uses_agent_alias_not_default() {
         let tmp = TempDir::new().unwrap();
@@ -1941,12 +2012,6 @@ mod tests {
         }
     }
 
-    /// End-to-end wiring test (issue #4627): tools registered via
-    /// `default_tools_with_runtime` against an ephemeral runtime must surface the
-    /// loud warning (shell/file_read/file_edit) or refuse outright (file_write).
-    /// The per-tool unit tests construct tools directly with the flag; this is
-    /// the only test that proves `has_filesystem_access()` is actually threaded
-    /// through registration to all four tools.
     #[tokio::test]
     async fn registered_tools_warn_or_block_on_ephemeral_runtime() {
         let tmp = TempDir::new().unwrap();
@@ -2115,12 +2180,6 @@ mod tests {
         assert!(names.contains(&"proxy_config"));
     }
 
-    /// Wiring guard for issue #6689: SOP tools registered via `all_tools` must
-    /// carry a real audit logger, so a tool-driven run persists the documented
-    /// `sop_run_*` Memory key. The per-tool unit tests prove `with_audit` works;
-    /// this is the only test proving registration actually wires it. Without the
-    /// `.with_audit(...)` calls in the SOP block, the audit trail is silently a
-    /// no-op on the agent path (the path the AMQP/sop_execute deployment uses).
     #[tokio::test]
     async fn registered_sop_tools_persist_audit_trail() {
         let tmp = TempDir::new().unwrap();
@@ -2175,6 +2234,7 @@ mod tests {
                 None,
                 Some(sop_engine),
                 Some(sop_audit),
+                None,
             )
             .tools
         };
@@ -2272,7 +2332,7 @@ mod tests {
     fn tool_result_with_error_serde() {
         let result = ToolResult {
             success: false,
-            output: String::new(),
+            output: ToolOutput::default(),
             error: Some("boom".into()),
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -2283,11 +2343,7 @@ mod tests {
 
     #[test]
     fn tool_spec_serde() {
-        let spec = ToolSpec {
-            name: "test".into(),
-            description: "A test tool".into(),
-            parameters: serde_json::json!({"type": "object"}),
-        };
+        let spec = ToolSpec::new("test", "A test tool", serde_json::json!({"type": "object"}));
         let json = serde_json::to_string(&spec).unwrap();
         let parsed: ToolSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "test");
@@ -2510,5 +2566,137 @@ mod tests {
             !subagent.iter().any(|n| n == ModelSwitchTool::NAME),
             "subagent must not be able to switch the inherited model"
         );
+    }
+
+    #[test]
+    fn all_tools_registers_read_skill_for_compact_agent_override_over_global_full() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig::default();
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        // Global stays Full; a runtime profile flips this agent to Compact and
+        // the agent selects it via `runtime_profile`.
+        cfg.skills.prompt_injection_mode = zeroclaw_config::schema::SkillsPromptInjectionMode::Full;
+        cfg.runtime_profiles.insert(
+            "compact_profile".to_string(),
+            zeroclaw_config::schema::RuntimeProfileConfig {
+                prompt_injection_mode: Some(
+                    zeroclaw_config::schema::SkillsPromptInjectionMode::Compact,
+                ),
+                ..Default::default()
+            },
+        );
+        cfg.agents.insert(
+            "test-agent".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                runtime_profile: "compact_profile".into(),
+                ..Default::default()
+            },
+        );
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            names.contains(&"read_skill"),
+            "compact runtime-profile override should register read_skill even when global is full"
+        );
+    }
+
+    #[test]
+    fn all_tools_omits_read_skill_for_full_agent_override_over_global_compact() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig::default();
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        // Global is Compact; a runtime profile pins this agent to Full and the
+        // agent selects it via `runtime_profile`.
+        cfg.skills.prompt_injection_mode =
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Compact;
+        cfg.runtime_profiles.insert(
+            "full_profile".to_string(),
+            zeroclaw_config::schema::RuntimeProfileConfig {
+                prompt_injection_mode: Some(
+                    zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+                ),
+                ..Default::default()
+            },
+        );
+        cfg.agents.insert(
+            "test-agent".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                runtime_profile: "full_profile".into(),
+                ..Default::default()
+            },
+        );
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"read_skill"),
+            "full runtime-profile override should omit read_skill even when global is compact"
+        );
+    }
+}
+
+#[cfg(test)]
+mod todo_registration_tests {
+    #[test]
+    fn todo_write_tool_name_is_stable() {
+        use zeroclaw_api::tool::Tool;
+        assert_eq!(super::todo_write::TodoWriteTool::new().name(), "TodoWrite");
     }
 }

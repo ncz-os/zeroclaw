@@ -1,51 +1,4 @@
 //! The agent turn engine, decomposed into single-purpose step modules.
-//!
-//! Public paths are unchanged: external code keeps importing via
-//! `crate::agent::loop_::*` (re-export block there). Full contract manifest:
-//! `/opt/notes/work/zeroclaw/unification_modular/RUN_SHEET.md` (condensed
-//! copy below) during the #7415 migration.
-//!
-//! # Run sheet (condensed)
-//!
-//! [`run_tool_call_loop`] is the orchestrator: loop control only, no step
-//! logic. [`TurnCtx`] carries shared refs ONLY; every `&mut` the loop owns
-//! (history, loop detector, `seen_tool_signatures` — reset per iteration —
-//! identical-output counters, accumulated display text, malformed-retry
-//! counter) stays a loop local passed as an explicit argument.
-//!
-//! Per-iteration step sequence:
-//!
-//! ```text
-//! preflight_history_maintenance(&mut history)            history_window.rs
-//! → [model-switch check — inline]
-//! → build_iteration_tool_specs(..)                       tool_specs.rs
-//! → resolve_vision_provider(..)                          vision_route.rs
-//! → [active triple derivation — inline]
-//! → prepare_messages_for_iteration(..)                   vision_route.rs
-//! → announce_llm_request(ctx, ..) -> Instant             provider_call.rs
-//! → enforce_tool_loop_budget()                           provider_call.rs
-//! → call_provider(ctx, ..) -> ProviderCallOutcome        provider_call.rs
-//!     [streaming: consume_provider_streaming_response]   stream_consume.rs
-//!     [cancel asymmetry: see ProviderCallOutcome docs]
-//! → Ok:  interpret_chat_response(ctx, ..)                parse_response.rs
-//!   Err: record_llm_failure(..);                         context_recovery.rs
-//!        try_recover_context_overflow(..) -> bool (true ⇒ continue)
-//! → resolve_display_text / [malformed-retry — inline]
-//!   / [no-tool exit — inline, stream_text_posthoc_chunks → events.rs]
-//! → prepare_tool_calls(ctx, &mut seen, ..)               call_prep.rs
-//!     [approval via gate_tool_approval]                  approval_gate.rs
-//! → [execute dispatch — inline → tool_execution::execute_tools_{parallel,sequential}]
-//! → record_executed_outcomes(ctx, .., &mut ordered)      post_exec.rs
-//! → collect_tool_results(..) -> CollectedResults         results_collect.rs
-//! → check_identical_output_abort(.., &mut counters)      results_collect.rs
-//! → append_tool_round_to_history(&mut history, ..)       history_append.rs
-//! [loop exhausted] → finish_after_max_iterations(..)     max_iter.rs
-//! ```
-//!
-//! Leaf/type modules: `context` (TurnCtx), `events` (StreamDelta/DraftEvent,
-//! pacing consts, post-hoc chunker), `outcome` (ToolLoopCancelled,
-//! ModelSwitchRequested), `redact` (scrub_credentials), `stream_guard` +
-//! `protocol_detect` (streaming protocol suppression), `delivery_defaults`.
 
 pub(crate) mod approval_gate;
 pub(crate) mod call_prep;
@@ -108,8 +61,10 @@ pub(crate) use stream_consume::consume_provider_streaming_response;
 pub(crate) use tool_specs::{IterationToolSpecs, build_iteration_tool_specs};
 pub(crate) use vision_route::{prepare_messages_for_iteration, resolve_vision_provider};
 
+use crate::agent::system_prompt::{NATIVE_TOOLS_TASK_FRAMING, NO_TOOLS_TASK_FRAMING};
 use crate::agent::tool_execution::{
-    execute_tools_parallel, execute_tools_sequential, should_execute_tools_in_parallel,
+    ToolDispatchContext, execute_tools_parallel, execute_tools_sequential,
+    should_execute_tools_in_parallel,
 };
 use crate::security::ingress::{IngressPolicy, ingress_policy};
 use crate::util::truncate_with_ellipsis;
@@ -131,39 +86,6 @@ pub(crate) const MAX_MALFORMED_TOOL_PROTOCOL_RETRIES: usize = 2;
 /// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
 pub(crate) const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 
-// ── Agent Tool-Call Loop ──────────────────────────────────────────────────
-// Core agentic iteration: send conversation to the LLM, parse any tool
-// calls from the response, execute them, append results to history, and
-// repeat until the LLM produces a final text-only answer.
-//
-// Loop invariant: at the start of each iteration, `history` contains the
-// full conversation so far (system prompt + user messages + prior tool
-// results). The loop exits when:
-//   • the LLM returns no tool calls (final answer), or
-//   • max_iterations is reached (runaway safety), or
-//   • the cancellation token fires (external abort).
-
-/// Execute a single turn of the agent loop: send messages, parse tool calls,
-/// execute tools, and loop until the LLM produces a final text response.
-///
-/// `new_messages_out` is an append-log: every message the loop adds to
-/// `history` is mirrored into it at push time (a clone taken before any
-/// later in-loop history maintenance), so it is populated on **every** exit
-/// — success, error, and cancellation — and never derived from history
-/// indices, which in-loop pruning can invalidate. Loop-detection system
-/// notes are the one exception (merged into the existing system message;
-/// only reachable when pattern loop detection is enabled, which no
-/// `new_messages_out` consumer turns on).
-/// All parameters of [`run_tool_call_loop`], bundled into one borrowed struct.
-///
-/// Field names and types mirror the loop's former positional arguments
-/// one-for-one (the loop borrows everything for the duration of the turn,
-/// including the `&mut` working sets `history`, `steering`, `new_messages_out`,
-/// and `image_cache`). [`LoopKnobs`] stays a nested sub-bundle in `knobs`.
-///
-/// Callers build this struct literal and pass it by value; the loop
-/// destructures it once at entry, so the body reads exactly as it did when
-/// these were positional parameters.
 pub struct ToolLoop<'a> {
     /// The resolved per-agent execution context: model binding, gated tool
     /// registry, approval, observability, and resolved runtime knobs. Stable
@@ -182,17 +104,60 @@ pub struct ToolLoop<'a> {
     pub steering: Option<&'a mut tokio::sync::mpsc::Receiver<String>>,
     pub new_messages_out: Option<&'a mut Vec<ChatMessage>>,
     pub image_cache: Option<&'a mut zeroclaw_providers::multimodal::LocalImageCache>,
-    /// The ingress envelope stamped by the entry layer (RFC #6971). Travels
-    /// with the turn into the engine, where the universal SOP policy layer
-    /// dispositions it at P1 (turn entry) and P2 (each steering injection).
-    /// Phase-1 callers stamp [`IngressContext::internal`]; real per-transport
-    /// stamping is phase 2. Owned (not borrowed) — the envelope is small and
-    /// consumed by the policy front door for the turn's lifetime.
     pub ingress: IngressContext,
+    /// The per-turn memory half for unified memory-context injection: the
+    /// handle, raw recall query, session scopes, and spawn-site suppression.
+    /// `None` for nested sub-turn sites and paths without a memory backend;
+    /// the injection decision itself is keyed on `ingress.origin`.
+    pub memory: Option<crate::agent::memory_inject::TurnMemory<'a>>,
     /// Observer metadata: agent alias and turn id, stamped onto every
     /// turn-level observer event so OTel spans correlate across the loop.
     pub agent_alias: Option<&'a str>,
     pub turn_id: &'a str,
+}
+
+async fn enforce_reported_budget(
+    history: &mut Vec<ChatMessage>,
+    reported_input_tokens: usize,
+    context_token_budget: usize,
+    event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
+    observer: &dyn crate::observability::Observer,
+) {
+    if context_token_budget == 0 || reported_input_tokens <= context_token_budget {
+        return;
+    }
+    let taken = std::mem::take(history);
+    let result = crate::agent::history_trim::trim_to_reported_budget(
+        taken,
+        context_token_budget,
+        reported_input_tokens,
+    );
+    if result.trimmed {
+        let mut trimmed = result.history;
+        crate::agent::history_trim::insert_breadcrumb_deduped(&mut trimmed);
+        *history = trimmed;
+        if let Some(tx) = event_tx {
+            let _ = tx
+                .send(TurnEvent::HistoryTrimmed {
+                    dropped_messages: result.dropped_messages,
+                    kept_turns: result.kept_turns,
+                    reason: crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+                })
+                .await;
+        }
+        observer.record_event(
+            &zeroclaw_api::observability_traits::ObserverEvent::HistoryTrimmed {
+                dropped_messages: result.dropped_messages,
+                kept_turns: result.kept_turns,
+                reason: crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+                channel: None,
+                agent_alias: None,
+                turn_id: None,
+            },
+        );
+    } else {
+        *history = result.history;
+    }
 }
 
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
@@ -211,6 +176,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
         mut new_messages_out,
         mut image_cache,
         ingress,
+        memory,
         agent_alias,
         turn_id,
     } = p;
@@ -242,13 +208,6 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
         knobs,
     } = exec;
 
-    // ── Ingress policy · P1 (turn entry) ────────────────────────────────────
-    // RFC #6971: every inbound turn passes the universal SOP policy layer before
-    // a model sees it. The default policy dispositions to `Loop` (run the agent,
-    // today's behavior); the layer is always on, never skipped. `ingress` is
-    // consumed here (passed to `ingress_policy`) so it is never dead code under
-    // `-D warnings`. The text dispositioned at P1 is the trailing user turn —
-    // the most recently appended `user` history message, when present.
     let ingress_policy_cfg = IngressPolicy::default();
     let p1_text = history
         .iter()
@@ -273,6 +232,39 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                 "turn-ingress-dropped",
                 &[("reason", reason.as_str())],
             ));
+        }
+    }
+
+    if let Some(turn_memory) = &memory {
+        let has_session = turn_memory.sessions.iter().any(Option::is_some);
+        if let crate::agent::memory_inject::InjectPolicy::Inject {
+            exclude_conversation,
+        } = crate::agent::memory_inject::resolve_inject_policy(
+            ingress.origin,
+            has_session,
+            turn_memory.suppress,
+        ) && let Some(last_user_idx) = history.iter().rposition(|m| m.role == "user")
+            // Idempotence: a model-switch retry re-enters the engine with the
+            // same history; the preamble must not stack.
+            && !history[last_user_idx]
+                .content
+                .starts_with(zeroclaw_memory::MEMORY_CONTEXT_OPEN)
+        {
+            let scopes: Vec<Option<&str>> =
+                turn_memory.sessions.iter().map(|s| s.as_deref()).collect();
+            let context = crate::agent::memory_inject::render_memory_context(
+                turn_memory.handle,
+                observer,
+                &turn_memory.query,
+                &scopes,
+                &turn_memory.cfg,
+                exclude_conversation,
+            )
+            .await;
+            if !context.is_empty() {
+                let existing = &history[last_user_idx].content;
+                history[last_user_idx].content = format!("{context}{existing}");
+            }
         }
     }
 
@@ -328,14 +320,6 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
     };
 
     for iteration in 0..max_iterations {
-        // Steering: fold caller-pushed mid-turn messages into history before
-        // this iteration's provider request.
-        //
-        // ── Ingress policy · P2 (steering drain) ────────────────────────────
-        // RFC #6971: each mid-turn injection passes the same universal policy
-        // layer as P1. The default policy dispositions to `Loop` → append as
-        // today. The envelope (`ingress`) carries the turn's provenance to the
-        // policy for each drained message.
         for steering_message in drain_steering_messages(&mut steering) {
             match ingress_policy(&steering_message, &ingress, &ingress_policy_cfg) {
                 // DEFAULT — append the injection to history exactly as today.
@@ -389,13 +373,37 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
         preflight_history_maintenance(history);
 
         if iteration == 0 && context_token_budget > 0 {
+            let system_floor = crate::agent::history::estimate_system_floor_tokens(history);
+            if system_floor >= context_token_budget {
+                let __zc_floor_span = ::zeroclaw_log::info_span!(
+                    target: "zeroclaw_log_internal_scope",
+                    "zeroclaw_scope",
+                    model = %model,
+                    model_provider = %provider_name,
+                );
+                let _zc_floor_guard = __zc_floor_span.entered();
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_category(::zeroclaw_log::EventCategory::Agent)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "system_floor": system_floor,
+                            "budget": context_token_budget,
+                            "error_key": "context_floor_exceeds_budget",
+                        })),
+                    crate::agent::history::context_floor_remediation(
+                        system_floor,
+                        context_token_budget,
+                    )
+                );
+            }
             let taken = std::mem::take(history);
             let result =
                 crate::agent::history_trim::trim_to_recent_turns(taken, context_token_budget);
             if result.trimmed {
                 let mut trimmed = result.history;
-                let system_count = trimmed.iter().take_while(|m| m.role == "system").count();
-                trimmed.insert(system_count, crate::agent::history_trim::breadcrumb());
+                crate::agent::history_trim::insert_breadcrumb_deduped(&mut trimmed);
                 *history = trimmed;
                 {
                     let __zc_trim_span = ::zeroclaw_log::info_span!(
@@ -509,6 +517,8 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             ..
         } = iteration_tool_specs;
 
+        refresh_prompt_anchor(history, use_native_tools);
+
         let prepared_messages = prepare_messages_for_iteration(
             history,
             multimodal_config,
@@ -591,6 +601,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             parse_issue_detected,
             protocol_suppressed,
             response_streamed_live,
+            reported_input_tokens,
         ) = match chat_result {
             Ok(resp) => {
                 let interpreted = interpret_chat_response(
@@ -613,6 +624,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                     interpreted.parse_issue_detected,
                     streamed_protocol_suppressed,
                     streamed_live_deltas,
+                    interpreted.input_tokens,
                 )
             }
             Err(e) => {
@@ -623,6 +635,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                     iteration,
                     event_tx.as_ref(),
                     observer,
+                    context_token_budget,
                 )
                 .await;
                 if recovered {
@@ -787,14 +800,18 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                 out.push(msg.clone());
             }
             history.push(msg);
+            if let Some(reported) = reported_input_tokens {
+                enforce_reported_budget(
+                    history,
+                    reported as usize,
+                    context_token_budget,
+                    event_tx.as_ref(),
+                    observer,
+                )
+                .await;
+            }
             return Ok(accumulated_display_text);
         }
-
-        // Do not accumulate intermediate-turn display text into the final
-        // channel response. Native tool-call providers may emit narration or
-        // scratchpad-like text alongside tool calls; draft-capable channels
-        // can still see it live through `on_delta` below, but the final
-        // delivered response must only contain the final assistant turn.
 
         // Relay only the portion of narration the live stream did not already
         // deliver: re-sending the whole thing duplicates it.
@@ -843,10 +860,14 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             crate::sop::executor::scope_live_action_queue(live_sop_queue.clone(), async {
                 if allow_parallel_execution && executable_calls.len() > 1 {
                     let meta = ctx.meta();
-                    execute_tools_parallel(
-                        &executable_calls,
+                    let dispatch = ToolDispatchContext {
                         tools_registry,
                         activated_tools,
+                        excluded_tools,
+                    };
+                    execute_tools_parallel(
+                        &executable_calls,
+                        dispatch,
                         &meta,
                         observer,
                         cancellation_token.as_ref(),
@@ -856,10 +877,14 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                     .await
                 } else {
                     let meta = ctx.meta();
-                    execute_tools_sequential(
-                        &executable_calls,
+                    let dispatch = ToolDispatchContext {
                         tools_registry,
                         activated_tools,
+                        excluded_tools,
+                    };
+                    execute_tools_sequential(
+                        &executable_calls,
+                        dispatch,
                         &meta,
                         observer,
                         cancellation_token.as_ref(),
@@ -919,6 +944,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                             error_reason: None,
                             duration: std::time::Duration::ZERO,
                             receipt: None,
+                            output_data: None,
                         },
                     ));
                 }
@@ -943,6 +969,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                         error_reason: None,
                         duration: std::time::Duration::ZERO,
                         receipt: None,
+                        output_data: None,
                     };
                     events::emit_tool_result(tx, &call_id, &call.name, &interrupted).await;
                 }
@@ -1037,6 +1064,17 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             )
             .await?;
         }
+
+        if let Some(reported) = reported_input_tokens {
+            enforce_reported_budget(
+                history,
+                reported as usize,
+                context_token_budget,
+                event_tx.as_ref(),
+                observer,
+            )
+            .await;
+        }
     }
 
     finish_after_max_iterations(
@@ -1054,6 +1092,91 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
         new_messages_out,
     )
     .await
+}
+
+fn collect_callable_tool_names(
+    tools_registry: &[Box<dyn crate::tools::Tool>],
+    activated_tools: Option<&Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
+) -> Vec<String> {
+    let mut names = tools_registry
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<Vec<_>>();
+    if let Some(activated) = activated_tools {
+        let activated = match activated.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_category(::zeroclaw_log::EventCategory::Tool)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                    "activated-tool lock poisoned while resolving SOP step scope; recovering guard for read"
+                );
+                poisoned.into_inner()
+            }
+        };
+        names.extend(activated.tool_names().into_iter().map(String::from));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn push_excluded_tool(excluded_tools: &mut Vec<String>, tool: impl Into<String>) {
+    let tool = tool.into();
+    if !excluded_tools
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&tool))
+    {
+        excluded_tools.push(tool);
+    }
+}
+
+fn sop_step_excluded_tools(
+    queued: &crate::sop::executor::QueuedSopAction,
+    run_id: &str,
+    step: &crate::sop::SopStep,
+    tools_registry: &[Box<dyn crate::tools::Tool>],
+    activated_tools: Option<&Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
+    excluded_tools: &[String],
+) -> Vec<String> {
+    let mut scoped = excluded_tools.to_vec();
+    for tool in ["sop_execute", "sop_advance", "sop_approve"] {
+        push_excluded_tool(&mut scoped, tool);
+    }
+
+    let registry_names = collect_callable_tool_names(tools_registry, activated_tools);
+    let active_scope = {
+        let engine = match queued.engine.lock() {
+            Ok(engine) => engine,
+            Err(poisoned) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_category(::zeroclaw_log::EventCategory::Tool)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"run_id": run_id, "step": step.number})),
+                    "SOP engine lock poisoned while resolving step tool scope; recovering guard for read"
+                );
+                poisoned.into_inner()
+            }
+        };
+        crate::sop::active_scope::resolve_active_step_scope(
+            run_id,
+            step,
+            engine.config(),
+            &registry_names,
+        )
+    };
+
+    if let Some(active_scope) = active_scope {
+        for tool in active_scope.excluded {
+            push_excluded_tool(&mut scoped, tool);
+        }
+    }
+    scoped.sort();
+    scoped
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1096,7 +1219,7 @@ async fn drive_live_sop_actions(
 ) -> Result<()> {
     let mut pending = std::collections::VecDeque::from(queued_actions);
     while let Some(queued) = pending.pop_front() {
-        let mut action = queued.action;
+        let mut action = queued.action.clone();
         loop {
             match action {
                 crate::sop::SopRunAction::ExecuteStep {
@@ -1111,63 +1234,71 @@ async fn drive_live_sop_actions(
                         out.push(user_message);
                     }
 
-                    let mut sop_excluded_tools = excluded_tools.to_vec();
-                    for tool in ["sop_execute", "sop_advance", "sop_approve"] {
-                        if !sop_excluded_tools.iter().any(|existing| existing == tool) {
-                            sop_excluded_tools.push(tool.to_string());
-                        }
-                    }
+                    let sop_excluded_tools = sop_step_excluded_tools(
+                        &queued,
+                        &run_id,
+                        &step,
+                        tools_registry,
+                        activated_tools,
+                        excluded_tools,
+                    );
 
                     let nested_turn_id = format!("sop:{run_id}:step:{}", step.number);
-                    let step_output = Box::pin(run_tool_call_loop(ToolLoop {
-                        exec: ResolvedAgentExecution::resolve(
-                            ResolvedModelAccess {
-                                model_provider,
-                                provider_name,
-                                model,
-                                temperature,
-                            },
-                            ResolvedIo {
-                                tools_registry,
-                                observer,
-                                silent,
-                                approval,
-                                multimodal_config,
-                                hooks,
-                                activated_tools,
-                                model_switch_callback: model_switch_callback.clone(),
-                                receipt_generator,
-                            },
-                            ResolvedRuntimeKnobs {
-                                max_tool_iterations,
-                                excluded_tools: &sop_excluded_tools,
-                                dedup_exempt_tools,
-                                pacing,
-                                strict_tool_parsing,
-                                parallel_tools,
-                                max_tool_result_chars,
-                                context_token_budget,
-                                knobs,
-                            },
-                        ),
-                        history,
-                        channel_name,
-                        channel_reply_target,
-                        cancellation_token: cancellation_token.clone(),
-                        on_delta: on_delta.clone(),
-                        shared_budget: shared_budget.clone(),
-                        channel,
-                        collected_receipts,
-                        event_tx: event_tx.clone(),
-                        steering: None,
-                        new_messages_out: new_messages_out.as_deref_mut(),
-                        image_cache: image_cache.as_deref_mut(),
-                        ingress: IngressContext::internal(),
-                        agent_alias,
-                        turn_id: &nested_turn_id,
-                    }))
+                    let step_call_sink = crate::sop::executor::new_step_call_sink();
+                    let step_output = crate::sop::executor::scope_step_call_sink(
+                        step_call_sink.clone(),
+                        Box::pin(run_tool_call_loop(ToolLoop {
+                            exec: ResolvedAgentExecution::resolve(
+                                ResolvedModelAccess {
+                                    model_provider,
+                                    provider_name,
+                                    model,
+                                    temperature,
+                                },
+                                ResolvedIo {
+                                    tools_registry,
+                                    observer,
+                                    silent,
+                                    approval,
+                                    multimodal_config,
+                                    hooks,
+                                    activated_tools,
+                                    model_switch_callback: model_switch_callback.clone(),
+                                    receipt_generator,
+                                },
+                                ResolvedRuntimeKnobs {
+                                    max_tool_iterations,
+                                    excluded_tools: &sop_excluded_tools,
+                                    dedup_exempt_tools,
+                                    pacing,
+                                    strict_tool_parsing,
+                                    parallel_tools,
+                                    max_tool_result_chars,
+                                    context_token_budget,
+                                    knobs,
+                                },
+                            ),
+                            history,
+                            channel_name,
+                            channel_reply_target,
+                            cancellation_token: cancellation_token.clone(),
+                            on_delta: on_delta.clone(),
+                            shared_budget: shared_budget.clone(),
+                            channel,
+                            collected_receipts,
+                            event_tx: event_tx.clone(),
+                            steering: None,
+                            new_messages_out: new_messages_out.as_deref_mut(),
+                            image_cache: image_cache.as_deref_mut(),
+                            memory: None,
+                            ingress: IngressContext::sub_turn(),
+                            agent_alias,
+                            turn_id: &nested_turn_id,
+                        })),
+                    )
                     .await;
 
+                    let step_calls = crate::sop::executor::drain_step_calls(&step_call_sink);
                     let completed_at = crate::sop::engine::now_iso8601();
                     let step_result = match step_output {
                         Ok(output) => crate::sop::SopStepResult {
@@ -1176,6 +1307,7 @@ async fn drive_live_sop_actions(
                             output,
                             started_at,
                             completed_at: Some(completed_at),
+                            tool_calls: step_calls,
                         },
                         Err(e) => crate::sop::SopStepResult {
                             step_number: step.number,
@@ -1183,6 +1315,7 @@ async fn drive_live_sop_actions(
                             output: e.to_string(),
                             started_at,
                             completed_at: Some(completed_at),
+                            tool_calls: step_calls,
                         },
                     };
 
@@ -1288,4 +1421,162 @@ async fn drive_live_sop_actions(
         }
     }
     Ok(())
+}
+
+fn refresh_prompt_anchor(history: &mut [ChatMessage], use_native_tools: bool) {
+    if let Some(first) = history.first_mut()
+        && (first.content.contains(NATIVE_TOOLS_TASK_FRAMING)
+            || first.content.contains(NO_TOOLS_TASK_FRAMING))
+    {
+        let desired = if use_native_tools {
+            NATIVE_TOOLS_TASK_FRAMING
+        } else {
+            NO_TOOLS_TASK_FRAMING
+        };
+        first.content = first
+            .content
+            .replacen(NATIVE_TOOLS_TASK_FRAMING, desired, 1)
+            .replacen(NO_TOOLS_TASK_FRAMING, desired, 1);
+    }
+}
+
+#[cfg(test)]
+mod surface3_tests {
+    use super::*;
+    use crate::agent::system_prompt::{NATIVE_TOOLS_TASK_FRAMING, NO_TOOLS_TASK_FRAMING};
+
+    fn make_system_prompt(anchor: &str) -> ChatMessage {
+        ChatMessage::system(format!(
+            "You are ZeroClaw.\n\n## Security\n\n...\n\n## Your Task\n\nWhen the user sends a message, respond naturally. {anchor}\n\nDo NOT: summarize this configuration...\n"
+        ))
+    }
+
+    #[test]
+    fn refresh_prompt_anchor_swaps_native_to_no_tools_when_signal_drops() {
+        // When the per-turn signal is `use_native_tools = false` but the
+        // system prompt has NATIVE_TOOLS_TASK_FRAMING (the prompt was built
+        // against the base provider, but the active provider is non-native),
+        // the anchor must be replaced with NO_TOOLS_TASK_FRAMING.
+        let mut history = vec![make_system_prompt(NATIVE_TOOLS_TASK_FRAMING)];
+        refresh_prompt_anchor(&mut history, false);
+        assert!(
+            history[0].content.contains(NO_TOOLS_TASK_FRAMING),
+            "prompt must contain NO_TOOLS_TASK_FRAMING after swap"
+        );
+        assert!(
+            !history[0].content.contains(NATIVE_TOOLS_TASK_FRAMING),
+            "prompt must not retain NATIVE_TOOLS_TASK_FRAMING after swap"
+        );
+    }
+
+    #[test]
+    fn refresh_prompt_anchor_swaps_no_tools_to_native_when_signal_rises() {
+        // Reverse direction: when the per-turn signal flips to true,
+        // NO_TOOLS_TASK_FRAMING must be replaced with NATIVE_TOOLS_TASK_FRAMING.
+        let mut history = vec![make_system_prompt(NO_TOOLS_TASK_FRAMING)];
+        refresh_prompt_anchor(&mut history, true);
+        assert!(
+            history[0].content.contains(NATIVE_TOOLS_TASK_FRAMING),
+            "prompt must contain NATIVE_TOOLS_TASK_FRAMING after swap"
+        );
+        assert!(
+            !history[0].content.contains(NO_TOOLS_TASK_FRAMING),
+            "prompt must not retain NO_TOOLS_TASK_FRAMING after swap"
+        );
+    }
+
+    #[test]
+    fn refresh_prompt_anchor_is_noop_when_anchor_already_matches() {
+        // Byte-stability: when the per-turn signal already matches the
+        // anchor in the prompt, the function must not mutate the content.
+        let original = make_system_prompt(NATIVE_TOOLS_TASK_FRAMING);
+        let mut history = vec![original.clone()];
+        refresh_prompt_anchor(&mut history, true);
+        assert_eq!(
+            history[0].content, original.content,
+            "content must be identical when anchor already matches signal"
+        );
+    }
+
+    #[test]
+    fn refresh_prompt_anchor_is_noop_when_no_anchor_present() {
+        // Custom system_prompt_prefix: when neither anchor is present,
+        // the function must not touch the prompt at all.
+        let custom_prompt = "You are a custom agent. Answer concisely.".to_string();
+        let mut history = vec![ChatMessage::system(custom_prompt.clone())];
+        refresh_prompt_anchor(&mut history, false);
+        assert_eq!(
+            history[0].content, custom_prompt,
+            "custom prompt without either anchor must be unchanged"
+        );
+    }
+
+    #[test]
+    fn refresh_prompt_anchor_noop_on_empty_history() {
+        // Edge case: empty history shouldn't panic.
+        let mut history: Vec<ChatMessage> = Vec::new();
+        refresh_prompt_anchor(&mut history, false);
+        // Just verifying no panic.
+    }
+}
+
+#[cfg(test)]
+mod reported_budget_tests {
+    use super::*;
+    use crate::observability::NoopObserver;
+
+    fn big_history() -> Vec<ChatMessage> {
+        let big = "x".repeat(2000);
+        vec![
+            ChatMessage::system("system"),
+            ChatMessage::user(format!("turn1 {big}")),
+            ChatMessage::assistant("a1".to_string()),
+            ChatMessage::user(format!("turn2 {big}")),
+            ChatMessage::assistant("a2".to_string()),
+            ChatMessage::user("turn3 short".to_string()),
+            ChatMessage::assistant("final answer".to_string()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn enforce_trims_when_reported_exceeds_budget() {
+        let mut history = big_history();
+        let before = history.len();
+        let estimated = crate::agent::history::estimate_history_tokens(&history);
+        let reported = estimated * 4;
+        let budget = reported / 2;
+        enforce_reported_budget(&mut history, reported, budget, None, &NoopObserver).await;
+        assert!(
+            history.len() < before,
+            "over-budget no-tool history must be trimmed before it is persisted"
+        );
+        assert_eq!(history[0].role, "system", "system prompt is preserved");
+        assert!(
+            history.iter().any(|m| m.content.contains("final answer")),
+            "the most recent turn survives the trim"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_noop_when_within_budget() {
+        let mut history = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("hi".to_string()),
+            ChatMessage::assistant("hello".to_string()),
+        ];
+        let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        let estimated = crate::agent::history::estimate_history_tokens(&history);
+        enforce_reported_budget(&mut history, estimated, estimated * 4, None, &NoopObserver).await;
+        let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(after, before, "within-budget history is untouched");
+    }
+
+    #[tokio::test]
+    async fn enforce_noop_when_budget_disabled() {
+        let mut history = big_history();
+        let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        enforce_reported_budget(&mut history, usize::MAX, 0, None, &NoopObserver).await;
+        let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(after, before, "zero budget disables enforcement");
+    }
 }

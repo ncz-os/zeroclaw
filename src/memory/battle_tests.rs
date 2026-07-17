@@ -1,8 +1,4 @@
 //! Battle tests for the memory system improvements.
-//!
-//! Exercises all 6 phases end-to-end: retrieval pipeline, namespace isolation,
-//! importance scoring, conflict resolution, audit trail, and policy engine.
-//! Designed to surface regressions in edge cases and multi-feature interactions.
 
 #[cfg(test)]
 mod tests {
@@ -388,6 +384,9 @@ mod tests {
             namespace: "default".into(),
             importance: None,
             superseded_by: None,
+            kind: None,
+            pinned: false,
+            tenant_id: None,
             agent_alias: None,
             agent_id: None,
         }];
@@ -412,6 +411,9 @@ mod tests {
             namespace: "default".into(),
             importance: Some(0.7),
             superseded_by: Some("newer_id".into()), // already superseded
+            kind: None,
+            pinned: false,
+            tenant_id: None,
             agent_alias: None,
             agent_id: None,
         }];
@@ -437,6 +439,9 @@ mod tests {
             namespace: "default".into(),
             importance: Some(0.7),
             superseded_by: None,
+            kind: None,
+            pinned: false,
+            tenant_id: None,
             agent_alias: None,
             agent_id: None,
         }];
@@ -1045,6 +1050,9 @@ mod tests {
             namespace: "my-namespace".into(),
             importance: Some(0.7),
             superseded_by: Some("newer-id".into()),
+            kind: None,
+            pinned: false,
+            tenant_id: None,
             agent_alias: None,
             agent_id: None,
         };

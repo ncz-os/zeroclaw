@@ -75,11 +75,6 @@ impl PluginHost {
         Ok(host)
     }
 
-    /// Parse the signature mode string from config into a `SignatureMode`.
-    /// Parse a `[plugins.security] signature_mode` config string into a
-    /// [`SignatureMode`]. Returns `None` for any unrecognized value so the
-    /// caller can surface the misconfiguration under its attribution span
-    /// instead of silently degrading to the weakest posture. Case-insensitive.
     pub fn parse_signature_mode(mode: &str) -> Option<SignatureMode> {
         match mode.to_lowercase().as_str() {
             "strict" => Some(SignatureMode::Strict),
@@ -89,11 +84,6 @@ impl PluginHost {
         }
     }
 
-    /// Resolve a `[plugins.security] signature_mode` config string into a
-    /// [`SignatureMode`], failing safe to [`SignatureMode::Strict`] on any
-    /// unrecognized value. The misconfiguration WARN is emitted under a
-    /// plugin-role attribution span so the record carries role context even
-    /// from context-free config call sites.
     #[must_use]
     pub fn resolve_signature_mode(mode: &str) -> SignatureMode {
         Self::parse_signature_mode(mode).unwrap_or_else(|| {
@@ -200,8 +190,10 @@ impl PluginHost {
         self.loaded.get(name).map(plugin_info_from_loaded)
     }
 
-    /// Install a plugin from a directory path.
-    pub fn install(&mut self, source: &str) -> Result<(), PluginError> {
+    /// Install a plugin from a directory path. Returns the installed
+    /// plugin's manifest name so callers can key follow-up work (config
+    /// seeding, messaging) off the canonical name rather than the source path.
+    pub fn install(&mut self, source: &str) -> Result<String, PluginError> {
         let source_path = PathBuf::from(source);
         let manifest_path = if source_path.is_dir() {
             source_path.join("manifest.toml")
@@ -271,6 +263,7 @@ impl PluginHost {
             }
         }
 
+        let installed_name = manifest.name.clone();
         self.loaded.insert(
             manifest.name.clone(),
             LoadedPlugin {
@@ -281,7 +274,7 @@ impl PluginHost {
             },
         );
 
-        Ok(())
+        Ok(installed_name)
     }
 
     /// Remove a plugin by name.
@@ -327,6 +320,14 @@ impl PluginHost {
             .collect()
     }
 
+    pub fn channel_plugin_details(&self) -> Vec<(&PluginManifest, &Path)> {
+        self.loaded
+            .values()
+            .filter(|p| p.manifest.capabilities.contains(&PluginCapability::Channel))
+            .filter_map(|p| p.wasm_path.as_deref().map(|wp| (&p.manifest, wp)))
+            .collect()
+    }
+
     /// Get skill-capable plugins.
     pub fn skill_plugins(&self) -> Vec<&PluginManifest> {
         self.loaded
@@ -336,12 +337,6 @@ impl PluginHost {
             .collect()
     }
 
-    /// Get skill-capable plugins paired with the absolute path to their `skills/`
-    /// directory. Plugins without an existing `skills/` subdirectory are skipped.
-    ///
-    /// Callers (typically the runtime skill loader) should pass each `skills_dir`
-    /// to `load_skills_from_directory` and then re-namespace the resulting skill
-    /// names as `plugin:<plugin>/<skill>` to avoid collisions with user skills.
     pub fn skill_plugin_details(&self) -> Vec<(&PluginManifest, PathBuf)> {
         self.loaded
             .values()
@@ -523,14 +518,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// Move every plugin (a subdirectory containing a `manifest.toml`) from `from`
-/// into `to`, returning the number moved.
-///
-/// Uses `rename`, falling back to a recursive copy + remove when the source and
-/// destination live on different filesystems. An existing `to/<name>` is never
-/// overwritten — that plugin is skipped. A missing or empty `from` is a no-op.
-/// Used by `zeroclaw plugin migrate` to relocate plugins stranded in legacy
-/// install directories into the configured one.
 pub fn migrate_plugins_dir(from: &Path, to: &Path) -> Result<usize, PluginError> {
     let Ok(entries) = std::fs::read_dir(from) else {
         return Ok(0);
@@ -649,7 +636,7 @@ capabilities = ["tool"]
 
     #[test]
     fn install_then_discover_round_trip_uses_same_dir() {
-        // Regression for the install/discovery path divergence (issue #6254):
+        // Regression for the install/discovery path divergence
         // a plugin installed into a resolved plugins dir must be discoverable
         // by a fresh host pointed at the *same* dir.
         let src = tempdir().unwrap();
@@ -965,6 +952,44 @@ capabilities = ["tool"]
         std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
     }
 
+    fn write_channel_plugin(plugins_dir: &Path, name: &str, with_wasm: bool) {
+        let plugin_dir = plugins_dir.join(name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let wasm_line = if with_wasm {
+            "wasm_path = \"plugin.wasm\"\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            plugin_dir.join("manifest.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"0.1.0\"\ncapabilities = [\"channel\"]\n{wasm_line}"
+            ),
+        )
+        .unwrap();
+        if with_wasm {
+            std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
+        }
+    }
+
+    #[test]
+    fn channel_plugin_details_yields_only_wasm_backed_channels() {
+        let dir = tempdir().unwrap();
+        let plugins_base = dir.path().join("plugins");
+        write_channel_plugin(&plugins_base, "with-wasm", true);
+        write_channel_plugin(&plugins_base, "no-wasm", false);
+
+        let host = PluginHost::new(dir.path()).unwrap();
+        let details = host.channel_plugin_details();
+        assert_eq!(
+            details.len(),
+            1,
+            "a channel manifest with no wasm_path is not registrable as a live channel"
+        );
+        assert_eq!(details[0].0.name, "with-wasm");
+        assert!(details[0].1.ends_with("plugin.wasm"));
+    }
+
     #[test]
     fn from_plugins_dir_with_security_strict_drops_unsigned_plugin() {
         let dir = tempdir().unwrap();
@@ -1017,7 +1042,7 @@ capabilities = ["tool"]
         assert_eq!(
             host.list_plugins().len(),
             1,
-            "permissive mode must load an unsigned plugin (signed-but-invalid is rejected by enforce_signature_policy, covered in signature.rs)"
+            "permissive mode must load an unsigned plugin (untrusted and invalid signatures also load with a warning in permissive mode, covered in signature.rs)"
         );
     }
 

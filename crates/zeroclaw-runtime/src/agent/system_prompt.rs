@@ -1,5 +1,4 @@
 //! System prompt construction for the agent loop and channel subsystem.
-//!
 //! These functions were originally in `channels/mod.rs` but live here to
 //! break a circular dependency between the channels and agent modules.
 
@@ -9,8 +8,8 @@ use crate::skills::Skill;
 
 /// Maximum characters per injected workspace file (matches `OpenClaw` default).
 pub const BOOTSTRAP_MAX_CHARS: usize = 20_000;
-pub(crate) const NO_TOOLS_TASK_FRAMING: &str = "No tools are available for this turn";
-pub(crate) const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires action";
+pub const NO_TOOLS_TASK_FRAMING: &str = "No tools are available for this turn";
+pub const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires action";
 
 fn load_openclaw_bootstrap_files(
     prompt: &mut String,
@@ -42,22 +41,6 @@ fn load_openclaw_bootstrap_files(
     }
 }
 
-/// Load workspace identity files and build a system prompt.
-///
-/// Follows the `OpenClaw` framework structure by default:
-/// 1. Tooling — tool list + descriptions
-/// 2. Safety — guardrail reminder
-/// 3. Skills — full skill instructions and tool metadata
-/// 4. Workspace — working directory
-/// 5. Bootstrap files — AGENTS, SOUL, TOOLS, IDENTITY, USER, BOOTSTRAP, MEMORY
-/// 6. Date — timezone offset for cache stability
-/// 7. Runtime — host, OS, model
-///
-/// When `identity_config` is set to AIEOS format, the bootstrap files section
-/// is replaced with the AIEOS identity data loaded from file or inline JSON.
-///
-/// Daily memory files (`memory/*.md`) are NOT injected — they are accessed
-/// on-demand via `memory_recall` / `memory_search` tools.
 pub fn build_system_prompt(
     workspace_dir: &std::path::Path,
     model_name: &str,

@@ -22,9 +22,21 @@ Composite job with multiple matrix legs:
 
 `fmt` runs first as the cheap serial gate. Every other job declares `needs: [fmt]` and fans out after formatting passes; `CI Required Gate` aggregates every result. Branch protection pins the composite gate job. A PR cannot merge until this is green. The `master` push run keeps the same quality signal while seeding trusted Rust caches for later PR runs.
 
+Fresh required CI is normally the shared evidence for the Cargo surfaces it actually runs. A local rerun of the same Cargo command on the same head, target, and feature set is duplicate confidence, not a stronger proof. Before asking for extra Cargo or Clippy, compare the changed surface with the current workflow files and the actual checks on the PR. Extra validation belongs where the required gate does not prove the thing under review:
+
+- a platform received compile checks but not tests;
+- a platform, crate, or path is outside the required lint job;
+- a desktop change did not trigger the desktop workflow;
+- a release target is outside the PR matrix and only covered by release/manual workflows;
+- stale, cancelled, skipped, or unavailable CI is not fresh evidence.
+
 ### Daily Advisory Scan (`daily-audit.yml`)
 
 Runs `cargo deny check advisories` daily at 09:00 UTC against the dependency tree. Opens an issue on findings. No action unless a vulnerability is reported.
+
+### Daily npm Audit (`daily-npm-audit.yml`)
+
+Runs `npm audit --audit-level=high` daily at 09:23 UTC against `web/package-lock.json`. Opens one deduplicated `security` + `dependencies` issue when high-severity npm advisories affect the committed web lockfile.
 
 ### PR Path Labeler (`pr-path-labeler.yml`)
 
@@ -33,6 +45,12 @@ Auto-applies path and scope labels based on changed files. It runs on PR open, r
 This workflow does not currently apply `risk:*`, `size:*`, `type:*`, contributor-tier, status, resolution, stale, or pickup labels. If a PR is missing a path/scope label, check whether the paths in `.github/labeler.yml` cover the changes.
 
 Dependabot has separate label configuration in `.github/dependabot.yml` for its own PRs. Cargo update PRs start with `dependencies`; GitHub Actions and Docker update PRs start with `ci` and `dependencies`.
+
+### Project Dashboard Planner (`project-dashboard-plan.yml`)
+
+Runs manually for a single issue number. It reads issue state and labels, then writes a report-only step summary proposing the existing Project Status value that best matches the issue.
+
+This workflow does not run automatically on issue events, write ProjectV2 fields, edit issues, add labels, post comments, or recalculate PR `risk:*`, `size:*`, or `type:*` labels. Live ProjectV2 mutation or automatic issue-event planning needs a separately approved field mapping, trigger policy, and project-scoped credential.
 
 ### Validate PR title (`pr-title.yml`)
 
@@ -44,7 +62,7 @@ Triggered on tag push (and `workflow_dispatch`); builds and publishes versioned 
 
 ### Docker Image PR Check (`docker-image-pr.yml`)
 
-Runs only when Docker image or release-Docker context files change. It prepares a smoke `docker-ctx` with the same helper used by the stable release workflow, then builds the default and Debian compatibility images without pushing either image. This catches image dependency and `COPY` path breakage before release without giving PR runs registry write permission or running on every PR.
+Runs only when Docker image or release-Docker context files change. It prepares a smoke `docker-ctx` with the same helper used by the stable release workflow, then builds the default prebuilt image and the Debian compatibility prebuilt image from `Dockerfile.ci` without pushing either image. This catches image dependency and `COPY` path breakage before release without giving PR runs registry write permission or running on every PR.
 
 ### Discord Release (`discord-release.yml`)
 
@@ -146,6 +164,8 @@ All third-party refs are pinned to a full commit SHA with a trailing version com
 | `slsa-framework/slsa-github-generator` (`v2.1.0`) | `release-stable-manual.yml` | Reusable workflow that produces SLSA L2 provenance for release artifacts |
 | `aquasecurity/trivy-action` (`v0.36.0`) | `docker-image-pr.yml`, `docker-publish.yml` | Report-only container vulnerability scanning |
 | `github/codeql-action/upload-sarif` (`v3.36.2`) | `docker-publish.yml` | Upload Trivy SARIF reports to the Security tab |
+| `github/codeql-action/init` (`v3`) | `ci-code-analysis.yml` | Initialize CodeQL Rust analysis |
+| `github/codeql-action/analyze` (`v3`) | `ci-code-analysis.yml` | Upload CodeQL SARIF to the Security tab |
 
 The GitHub Release itself is created with `gh release create` inside the `publish` job, not a release action.
 
@@ -161,6 +181,8 @@ anchore/sbom-action@*
 slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@*
 aquasecurity/trivy-action@*
 github/codeql-action/upload-sarif@*
+github/codeql-action/init@*
+github/codeql-action/analyze@*
 ```
 
 Export the current effective policy:

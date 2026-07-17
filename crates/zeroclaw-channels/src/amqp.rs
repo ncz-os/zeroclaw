@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use portable_atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use futures_util::StreamExt;
@@ -12,14 +12,14 @@ use lapin::{
     types::FieldTable,
 };
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
+use zeroclaw_config::schema::SopDispatch;
+use zeroclaw_runtime::sop::audit::SopAuditLogger;
+use zeroclaw_runtime::sop::dispatch::dispatch_untrusted_fan_in;
+use zeroclaw_runtime::sop::engine::SopEngine;
+use zeroclaw_runtime::sop::types::SopTriggerSource;
 
 static MSG_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Generic AMQP 0-9-1 topic consumer as a chat-loop `Channel`.
-///
-/// Binds a queue to an exchange, consumes deliveries, and lifts each JSON
-/// body into a `ChannelMessage` driving the agent loop. The body-to-message
-/// mapping is config-driven so a new publisher is onboarded by configuration.
 pub struct AmqpChannel {
     amqp_url: String,
     exchange: String,
@@ -32,6 +32,9 @@ pub struct AmqpChannel {
     content_template: String,
     thread_id_field: String,
     durable_ack: bool,
+    dispatch: SopDispatch,
+    engine: Option<Arc<Mutex<SopEngine>>>,
+    audit: Option<Arc<SopAuditLogger>>,
     alias: String,
     peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
@@ -49,13 +52,36 @@ pub struct AmqpChannelConfig {
     pub content_template: String,
     pub thread_id_field: String,
     pub durable_ack: bool,
+    pub dispatch: SopDispatch,
+    pub engine: Option<Arc<Mutex<SopEngine>>>,
+    pub audit: Option<Arc<SopAuditLogger>>,
     pub alias: String,
     pub peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryOutcome {
+    Processed,
+    ReceiverGone,
+}
+
 impl AmqpChannel {
-    pub fn new(cfg: AmqpChannelConfig) -> Self {
-        Self {
+    pub fn new(cfg: AmqpChannelConfig) -> anyhow::Result<Self> {
+        let routes_sop = matches!(
+            cfg.dispatch,
+            SopDispatch::Sop | SopDispatch::SopAndAgentLoop
+        );
+        if routes_sop && (cfg.engine.is_none() || cfg.audit.is_none()) {
+            anyhow::bail!(
+                "amqp.{}: dispatch = {:?} routes to the SOP engine but no SOP \
+                 engine/audit handles are available; refusing to start a \
+                 channel that would acknowledge deliveries without dispatching \
+                 them",
+                cfg.alias,
+                cfg.dispatch
+            );
+        }
+        Ok(Self {
             amqp_url: cfg.amqp_url,
             exchange: cfg.exchange,
             routing_keys: cfg.routing_keys,
@@ -67,9 +93,12 @@ impl AmqpChannel {
             content_template: cfg.content_template,
             thread_id_field: cfg.thread_id_field,
             durable_ack: cfg.durable_ack,
+            dispatch: cfg.dispatch,
+            engine: cfg.engine,
+            audit: cfg.audit,
             alias: cfg.alias,
             peer_resolver: cfg.peer_resolver,
-        }
+        })
     }
 
     pub fn alias(&self) -> &str {
@@ -98,14 +127,63 @@ impl AmqpChannel {
         (content, thread_ts)
     }
 
-    /// Establish a lapin connection on the existing tokio runtime, declaring
-    /// the executor and reactor adapters so lapin does not spin its own
-    /// `async-global-executor`. The Tokio reactor adapter is Unix-only, so
-    /// non-Unix targets use lapin's cross-platform async-io reactor adapter.
-    /// A configured `ca_cert` is supplied as the custom certificate chain for
-    /// `amqps://` server verification, and a configured
-    /// `client_cert`/`client_key` pair is presented as the client identity for
-    /// broker mutual-TLS auth (Fedora Messaging requires this).
+    async fn route_delivery(
+        &self,
+        routing_key: &str,
+        data: &[u8],
+        tx: &mpsc::Sender<ChannelMessage>,
+    ) -> DeliveryOutcome {
+        let routes_sop = matches!(
+            self.dispatch,
+            SopDispatch::Sop | SopDispatch::SopAndAgentLoop
+        );
+        let routes_agent = matches!(
+            self.dispatch,
+            SopDispatch::AgentLoop | SopDispatch::SopAndAgentLoop
+        );
+
+        if routes_agent {
+            let (content, thread_ts) = self.map_delivery(data);
+            let seq = MSG_SEQ.fetch_add(1, Ordering::Relaxed);
+
+            let channel_msg = ChannelMessage {
+                id: format!("amqp_{}_{seq}", chrono::Utc::now().timestamp_millis()),
+                sender: self.sender_label.clone(),
+                reply_target: self.sender_label.clone(),
+                content,
+                channel: "amqp".to_string(),
+                channel_alias: Some(self.alias.clone()),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                thread_ts,
+                interruption_scope_id: None,
+                attachments: vec![],
+                subject: None,
+
+                ..Default::default()
+            };
+
+            if tx.send(channel_msg).await.is_err() {
+                return DeliveryOutcome::ReceiverGone;
+            }
+        }
+
+        if routes_sop && let (Some(engine), Some(audit)) = (&self.engine, &self.audit) {
+            dispatch_untrusted_fan_in(
+                engine,
+                audit,
+                SopTriggerSource::Amqp,
+                Some(routing_key),
+                Some(&String::from_utf8_lossy(data)),
+            )
+            .await;
+        }
+
+        DeliveryOutcome::Processed
+    }
+
     async fn connect(&self) -> anyhow::Result<Connection> {
         let props = amqp_connection_properties();
 
@@ -128,15 +206,6 @@ impl AmqpChannel {
         .map_err(Into::into)
     }
 
-    /// Build the client-auth identity for mutual TLS from the configured PEM
-    /// `client_cert` and `client_key`. tcp-stream's rustls path consumes the
-    /// identity as a PKCS#12 DER bundle, so we parse the PEM cert chain and
-    /// private key to DER and assemble an in-memory PKCS#12 keystore protected
-    /// by an ephemeral password (the bundle never leaves this process).
-    ///
-    /// Returns `Ok(None)` when no client cert/key is configured (server-auth
-    /// only). Both must be supplied together; supplying one without the other
-    /// is a configuration error.
     fn build_client_identity(&self) -> anyhow::Result<Option<OwnedIdentity>> {
         let (cert_path, key_path) = match (&self.client_cert, &self.client_key) {
             (Some(cert), Some(key)) => (cert, key),
@@ -226,12 +295,12 @@ fn amqp_connection_properties() -> ConnectionProperties {
     }
 }
 
-/// Ephemeral password protecting the in-memory PKCS#12 identity. The bundle is
+/// Ephemeral password protecting the in-memory PKCSidentity. The bundle is
 /// built and consumed within a single connect call and never persisted, so the
-/// password only has to round-trip through tcp-stream's PKCS#12 reader.
+/// password only has to round-trip through tcp-stream's PKCSreader.
 const PKCS12_PASSWORD: &str = "zeroclaw-amqp";
 
-/// Convert a PEM client certificate chain and private key into a PKCS#12 DER
+/// Convert a PEM client certificate chain and private key into a PKCSDER
 /// bundle suitable for tcp-stream's rustls client-auth path.
 fn pem_to_pkcs12_der(cert_pem: &[u8], key_pem: &[u8], alias: &str) -> anyhow::Result<Vec<u8>> {
     use p12_keystore::{Certificate, KeyStore, KeyStoreEntry, PrivateKeyChain};
@@ -308,34 +377,14 @@ impl Channel for AmqpChannel {
                 continue;
             };
 
-            let (content, thread_ts) = self.map_delivery(&delivery.data);
-            let seq = MSG_SEQ.fetch_add(1, Ordering::Relaxed);
-
-            let channel_msg = ChannelMessage {
-                id: format!("amqp_{}_{seq}", chrono::Utc::now().timestamp_millis()),
-                sender: self.sender_label.clone(),
-                reply_target: self.sender_label.clone(),
-                content,
-                channel: "amqp".to_string(),
-                channel_alias: Some(self.alias.clone()),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                thread_ts,
-                interruption_scope_id: None,
-                attachments: vec![],
-                subject: None,
-
-                ..Default::default()
-            };
-
-            if tx.send(channel_msg).await.is_err() {
-                return Ok(());
-            }
-
-            if self.durable_ack {
-                delivery.acker.ack(BasicAckOptions::default()).await?;
+            let routing_key = delivery.routing_key.as_str().to_string();
+            match self.route_delivery(&routing_key, &delivery.data, &tx).await {
+                DeliveryOutcome::Processed => {
+                    if self.durable_ack {
+                        delivery.acker.ack(BasicAckOptions::default()).await?;
+                    }
+                }
+                DeliveryOutcome::ReceiverGone => return Ok(()),
             }
         }
 
@@ -418,7 +467,13 @@ fn str_of_value(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    fn channel_with(content_template: &str, thread_id_field: &str) -> AmqpChannel {
+    fn try_channel_with(
+        content_template: &str,
+        thread_id_field: &str,
+        dispatch: SopDispatch,
+        engine: Option<Arc<Mutex<SopEngine>>>,
+        audit: Option<Arc<SopAuditLogger>>,
+    ) -> anyhow::Result<AmqpChannel> {
         AmqpChannel::new(AmqpChannelConfig {
             amqp_url: "amqp://localhost:5672".into(),
             exchange: "amq.topic".into(),
@@ -431,9 +486,23 @@ mod tests {
             content_template: content_template.into(),
             thread_id_field: thread_id_field.into(),
             durable_ack: true,
+            dispatch,
+            engine,
+            audit,
             alias: "stagex".into(),
             peer_resolver: Arc::new(Vec::new),
         })
+    }
+
+    fn channel_with(content_template: &str, thread_id_field: &str) -> AmqpChannel {
+        try_channel_with(
+            content_template,
+            thread_id_field,
+            SopDispatch::AgentLoop,
+            None,
+            None,
+        )
+        .expect("agent-loop dispatch needs no SOP handles")
     }
 
     #[test]
@@ -563,7 +632,7 @@ tr7J6RKtO4OsZS/2KoYL8M+o
     fn pem_to_pkcs12_der_roundtrips() {
         let der = pem_to_pkcs12_der(TEST_CERT_PEM.as_bytes(), TEST_KEY_PEM.as_bytes(), "stagex")
             .expect("PEM cert+key should convert to a PKCS#12 bundle");
-        // The same PKCS#12 reader tcp-stream uses must be able to parse it back
+        // The same PKCSreader tcp-stream uses must be able to parse it back
         // and recover a private key chain.
         let store = p12_keystore::KeyStore::from_pkcs12(&der, PKCS12_PASSWORD)
             .expect("generated PKCS#12 should parse");
@@ -577,5 +646,81 @@ tr7J6RKtO4OsZS/2KoYL8M+o
     fn build_client_identity_none_without_cert() {
         let ch = channel_with("", "");
         assert!(ch.build_client_identity().expect("no client tls").is_none());
+    }
+
+    fn sop_handles() -> (Arc<Mutex<SopEngine>>, Arc<SopAuditLogger>) {
+        use zeroclaw_config::schema::SopConfig;
+        use zeroclaw_memory::NoneMemory;
+        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+        let audit = Arc::new(SopAuditLogger::new(Arc::new(NoneMemory::new("none"))));
+        (engine, audit)
+    }
+
+    #[test]
+    fn new_rejects_sop_dispatch_without_handles() {
+        for dispatch in [SopDispatch::Sop, SopDispatch::SopAndAgentLoop] {
+            let result = try_channel_with("", "", dispatch, None, None);
+            let Err(err) = result else {
+                panic!("SOP dispatch without engine/audit must fail closed");
+            };
+            assert!(
+                err.to_string().contains("SOP engine"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_accepts_agent_loop_without_handles() {
+        assert!(try_channel_with("", "", SopDispatch::AgentLoop, None, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn combined_route_fails_closed_when_receiver_gone() {
+        let (engine, audit) = sop_handles();
+        let ch = try_channel_with(
+            "{name}",
+            "name",
+            SopDispatch::SopAndAgentLoop,
+            Some(engine),
+            Some(audit),
+        )
+        .expect("sop_and_agent_loop with handles constructs");
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(1);
+        drop(rx);
+
+        let outcome = ch
+            .route_delivery("anitya.update", br#"{"name":"curl"}"#, &tx)
+            .await;
+
+        assert_eq!(
+            outcome,
+            DeliveryOutcome::ReceiverGone,
+            "a closed receiver must short-circuit before SOP dispatch so the \
+             delivery is left unacked for broker redelivery, not run as a SOP"
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_route_dispatches_agent_when_receiver_open() {
+        let (engine, audit) = sop_handles();
+        let ch = try_channel_with(
+            "{name}",
+            "name",
+            SopDispatch::SopAndAgentLoop,
+            Some(engine),
+            Some(audit),
+        )
+        .expect("sop_and_agent_loop with handles constructs");
+
+        let (tx, mut rx) = mpsc::channel::<ChannelMessage>(1);
+        let outcome = ch
+            .route_delivery("anitya.update", br#"{"name":"curl"}"#, &tx)
+            .await;
+
+        assert_eq!(outcome, DeliveryOutcome::Processed);
+        let msg = rx.recv().await.expect("agent-loop message delivered");
+        assert_eq!(msg.content, "curl");
     }
 }

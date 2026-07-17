@@ -17,6 +17,7 @@ pub struct SkillAuditOptions {
 pub struct SkillAuditReport {
     pub files_scanned: usize,
     pub findings: Vec<String>,
+    pub scripts_blocked: bool,
 }
 
 impl SkillAuditReport {
@@ -96,6 +97,7 @@ pub fn audit_open_skill_markdown(path: &Path, repo_root: &Path) -> Result<SkillA
     let mut report = SkillAuditReport {
         files_scanned: 1,
         findings: Vec::new(),
+        ..Default::default()
     };
     audit_markdown_file(&canonical_repo, &canonical_path, &mut report)?;
     Ok(report)
@@ -151,6 +153,7 @@ fn audit_path(
     }
 
     if !options.allow_scripts && is_unsupported_script_file(path) {
+        report.scripts_blocked = true;
         report.findings.push(format!(
             "{rel}: script-like files are blocked by skill security policy."
         ));
@@ -247,13 +250,6 @@ fn audit_markdown_link_target(
 
     if let Some(scheme) = url_scheme(normalized) {
         if matches!(scheme, "http" | "https" | "mailto") {
-            // Remote documentation links are passed through as prompt text; the
-            // loader never fetches them at audit/load time, and any later fetch
-            // stays governed by normal tool/network policy. A `.md` suffix does
-            // not reliably indicate Markdown content (many docs sites serve HTML
-            // at `.md` routes), so flagging these was a false positive that
-            // silently degraded legitimate skills. Structural checks below still
-            // reject other schemes (e.g. `javascript:`/`file:`). See #6714.
             return;
         }
 
@@ -338,11 +334,6 @@ fn audit_markdown_link_target(
     }
 }
 
-/// Check if a link target appears to be a cross-skill reference.
-/// Cross-skill references can take several forms:
-/// 1. Parent directory traversal: `../other-skill/SKILL.md`
-/// 2. Bare skill filename: `other-skill.md` (reference to another skill's markdown)
-/// 3. Explicit relative path: `./other-skill.md`
 fn is_cross_skill_reference(target: &str) -> bool {
     let path = Path::new(target);
 
@@ -364,9 +355,6 @@ fn is_cross_skill_reference(target: &str) -> bool {
     !stripped.contains('/') && !stripped.contains('\\') && has_markdown_suffix(stripped)
 }
 
-/// Best-effort detection of the shared skills directory root for an installed skill.
-/// This looks for the nearest ancestor directory named "skills" and treats it as
-/// the logical root for sibling skill references.
 fn skills_root_for(root: &Path) -> Option<PathBuf> {
     let mut current = root;
     loop {
@@ -522,12 +510,6 @@ fn looks_like_absolute_path(target: &str) -> bool {
     if target.starts_with("~/") {
         return true;
     }
-
-    // NOTE: We intentionally do NOT reject paths starting with ".." here.
-    // Relative paths with parent directory references (e.g., "../other-skill/SKILL.md")
-    // are allowed to pass through to the canonicalization check below, which will
-    // properly validate that they resolve within the skill root.
-    // This enables cross-skill references in open-skills while still maintaining security.
 
     false
 }
@@ -850,7 +832,7 @@ EOF\"\"\"
 
     #[test]
     fn audit_allows_remote_markdown_documentation_links() {
-        // Regression for #6714: remote http/https/mailto links that happen to
+        // remote http/https/mailto links that happen to
         // end in `.md`/`.markdown` are documentation references, not fetched at
         // load time, so they must not be flagged. Real skills (e.g. Cloudinary,
         // Sanity) cite many such URLs.
@@ -872,7 +854,7 @@ EOF\"\"\"
 
     #[test]
     fn audit_still_rejects_unsupported_url_schemes() {
-        // The structural scheme check must survive the #6714 cleanup: only
+        // The structural scheme check must survive thecleanup: only
         // http/https/mailto pass through; other schemes (javascript:, file:)
         // are still rejected.
         let dir = tempfile::tempdir().unwrap();

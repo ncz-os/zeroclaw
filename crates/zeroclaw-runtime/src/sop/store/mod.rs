@@ -1,18 +1,4 @@
 //! Durable SOP run-state store (EPIC B) — the keystone contract.
-//!
-//! A single [`SopRunStore`] is owned by the engine singleton (EPIC A). It is the
-//! one durable home for run state, the CAS-claim admission primitive
-//! (concurrency-control), the append-only event log (audit-trail / observability),
-//! and the procedural-memory proposal namespace — so those epics ride **one**
-//! abstraction, not three.
-//!
-//! This module ships the trait + wire shapes, the in-memory default impl (which
-//! mirrors today's behaviour with persistence off), the durable
-//! [`SqliteRunStore`], and the config-driven `build_run_store` factory.
-//! `build_sop_engine` injects the selected backend and rehydrates in-flight runs
-//! at startup via `restore_runs()`. (A `Memory`-backed adapter was considered and
-//! dropped: the `Memory` trait is async while `SopRunStore` is sync.) See
-//! `epics/B-run-state-store/{03-architecture,04-implementation-plan}.md`.
 
 pub mod model;
 pub mod sqlite;
@@ -24,17 +10,11 @@ use std::sync::{Arc, Mutex};
 use zeroclaw_config::schema::{SopConfig, SopRunStoreBackend};
 
 pub use model::{
-    ClaimToken, PersistedRun, ProposalRecord, ProposalStatus, RetentionPolicy, SOP_STORE_VERSION,
-    SopEventRecord,
+    ClaimToken, PersistedRun, ProposalKind, ProposalRecord, ProposalStatus, RetentionPolicy,
+    SOP_STORE_VERSION, SopEventRecord,
 };
 pub use sqlite::SqliteRunStore;
 
-/// First-class durable run-state store. ONE per engine singleton.
-///
-/// All methods are sync and **fail-loud**: a store error is never silently
-/// swallowed (persistence is fail-closed). Implementations must be cheap to
-/// `Arc::clone` and safe to share across the daemon tick, agent tools, MQTT
-/// listener, and the gateway approve surface.
 pub trait SopRunStore: Send + Sync {
     // ── run state (persistence-resume, state-machine) ──
     /// Persist-before-mutate. Revision-guarded: a strictly-older revision is
@@ -49,16 +29,20 @@ pub trait SopRunStore: Send + Sync {
     fn finish_run(&self, run_id: &str, terminal: &PersistedRun) -> Result<(), StoreError>;
     /// Boot-rehydrate source: every non-terminal run (latest revision per id).
     fn load_active_runs(&self) -> Result<Vec<PersistedRun>, StoreError>;
+    /// Boot-rehydrate source for the display retention window: terminal runs,
+    /// newest-first by `started_at`, truncated to `limit` (0 = unbounded). The
+    /// engine seeds `finished_runs` from this so completed/failed/cancelled runs
+    /// survive a restart in the Runs surface, matching `max_finished_runs`.
+    fn load_terminal_runs(&self, limit: usize) -> Result<Vec<PersistedRun>, StoreError>;
     /// Single run by id (latest revision), terminal or not.
     fn load_run(&self, run_id: &str) -> Result<Option<PersistedRun>, StoreError>;
+    /// `completed_at` of the most recently successful terminal run for `sop_name`,
+    /// or `None` if that SOP has no completed run with a recorded completion.
+    /// Drives the cooldown check off the shared store so every engine holder
+    /// observes the same success marker (not just the engine that ran the SOP).
+    fn last_terminal_completed_at(&self, sop_name: &str) -> Result<Option<String>, StoreError>;
 
     // ── CAS claim primitive (concurrency-control) ──
-    /// Atomic single-winner admission honoring BOTH concurrency limits. Returns
-    /// `Some(token)` to exactly one caller iff no live claim exists for `run_id`,
-    /// the run is not terminal, the live claims for `sop_name` stay below
-    /// `per_sop_cap`, AND total live claims stay below `global_cap`. Both caps
-    /// are inclusive maxima counted under one lock (mirrors the engine
-    /// `can_start`); a cap of 0 admits nothing. Otherwise `None`.
     fn try_claim_run(
         &self,
         run_id: &str,
@@ -66,6 +50,14 @@ pub trait SopRunStore: Send + Sync {
         per_sop_cap: usize,
         global_cap: usize,
     ) -> Result<Option<ClaimToken>, StoreError>;
+    fn renew_claim_for_restore(
+        &self,
+        run_id: &str,
+        sop_name: &str,
+    ) -> Result<ClaimToken, StoreError>;
+    /// Live claim counts as `(for_sop, total)`, used by read-only admission
+    /// checks so status surfaces observe the same concurrency source as CAS.
+    fn claim_counts(&self, sop_name: &str) -> Result<(usize, usize), StoreError>;
     /// Renew a claim's lease (tick liveness). No-op if the claim is gone.
     fn heartbeat_claim(&self, token: &ClaimToken) -> Result<(), StoreError>;
     /// Release a claim (finish/cancel), freeing the slot for admission.
@@ -155,20 +147,6 @@ impl From<serde_json::Error> for StoreError {
     }
 }
 
-/// Build the configured run store.
-///
-/// - `persist_runs = false` (default) -> ephemeral [`InMemoryRunStore`] (current behaviour).
-/// - `persist_runs = true`, backend `"sqlite"` (default) -> [`SqliteRunStore`] at
-///   `<run_state_dir | data_dir/sop>/runs.db` (dir created mode-0700).
-/// - `persist_runs = true`, backend `"memory"` -> ephemeral [`InMemoryRunStore`] (degraded/tests).
-///
-/// The backend is the closed `SopRunStoreBackend` enum, so an out-of-set value is
-/// rejected at config-deserialize time rather than here (no runtime unknown arm).
-///
-/// Called by `build_sop_engine`, which injects the result via `with_store` and
-/// then calls `restore_runs()` to rehydrate in-flight runs at startup. A
-/// backend-open failure is non-fatal there: the daemon logs and falls back to
-/// the in-memory store rather than failing to boot.
 pub fn build_run_store(
     cfg: &SopConfig,
     data_dir: &Path,
@@ -237,11 +215,6 @@ impl InMemoryRunStore {
     }
 }
 
-/// Revision guard shared by every write path: returns `Ok(())` only when
-/// `incoming` is safe to persist over `existing` (a first write, a strictly
-/// newer revision, or a byte-identical same-revision retry). A strictly older
-/// revision is `StaleRevision`; a divergent same-revision payload is
-/// `RevisionConflict`. Durable backends apply the same rule transactionally.
 fn revision_guard(
     existing: Option<&PersistedRun>,
     incoming: &PersistedRun,
@@ -293,8 +266,37 @@ impl SopRunStore for InMemoryRunStore {
             .collect())
     }
 
+    fn load_terminal_runs(&self, limit: usize) -> Result<Vec<PersistedRun>, StoreError> {
+        let g = self.lock()?;
+        let mut out: Vec<PersistedRun> = g
+            .runs
+            .values()
+            .filter(|r| g.terminal.contains(r.run_id()))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.run.started_at.cmp(&a.run.started_at));
+        if limit > 0 && out.len() > limit {
+            out.truncate(limit);
+        }
+        Ok(out)
+    }
+
     fn load_run(&self, run_id: &str) -> Result<Option<PersistedRun>, StoreError> {
         Ok(self.lock()?.runs.get(run_id).cloned())
+    }
+
+    fn last_terminal_completed_at(&self, sop_name: &str) -> Result<Option<String>, StoreError> {
+        let g = self.lock()?;
+        // Max `completed_at` over successful terminal runs for this SOP.
+        // Timestamps are ISO-8601 UTC ("...Z"), which sort lexically in
+        // completion order.
+        Ok(g.terminal
+            .iter()
+            .filter_map(|id| g.runs.get(id))
+            .filter(|r| r.run.sop_name == sop_name)
+            .filter(|r| r.run.status == crate::sop::types::SopRunStatus::Completed)
+            .filter_map(|r| r.run.completed_at.clone())
+            .max())
     }
 
     fn try_claim_run(
@@ -334,6 +336,31 @@ impl SopRunStore for InMemoryRunStore {
         };
         g.claims.insert(run_id.to_string(), token.clone());
         Ok(Some(token))
+    }
+
+    fn renew_claim_for_restore(
+        &self,
+        run_id: &str,
+        sop_name: &str,
+    ) -> Result<ClaimToken, StoreError> {
+        let mut g = self.lock()?;
+        // No cap check: a restored run was already admitted before the restart.
+        // Idempotent insert/overwrite (matches the in-memory empty-lease shape).
+        let token = ClaimToken {
+            run_id: run_id.to_string(),
+            sop_name: sop_name.to_string(),
+            claimed_at: String::new(),
+            lease_expires: String::new(),
+            holder: "in-memory".to_string(),
+        };
+        g.claims.insert(run_id.to_string(), token.clone());
+        Ok(token)
+    }
+
+    fn claim_counts(&self, sop_name: &str) -> Result<(usize, usize), StoreError> {
+        let g = self.lock()?;
+        let per_sop = g.claims.values().filter(|c| c.sop_name == sop_name).count();
+        Ok((per_sop, g.claims.len()))
     }
 
     fn heartbeat_claim(&self, _token: &ClaimToken) -> Result<(), StoreError> {
@@ -395,11 +422,6 @@ impl SopRunStore for InMemoryRunStore {
         let mut g = self.lock()?;
         let mut dropped = 0usize;
 
-        // Age bound (`keep_secs`): drop terminal runs whose completion (or start,
-        // when completion is unset) time is older than the cutoff, independently
-        // of the count, so it also applies when `max_terminal` is unbounded (0).
-        // The cutoff is formatted to match `now_iso8601()` (trailing "Z") so the stored
-        // ISO-8601 UTC timestamps compare lexically.
         if let Some(keep) = policy.keep_secs {
             let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(keep as i64))
                 .format("%Y-%m-%dT%H:%M:%SZ")
@@ -487,6 +509,7 @@ mod tests {
                 payload: None,
                 timestamp: started_at.clone(),
             },
+            frame_marker_id: format!("marker-{id}"),
             status: SopRunStatus::Running,
             current_step: 0,
             total_steps: 1,
@@ -521,13 +544,20 @@ mod tests {
     fn proposal(id: &str, status: ProposalStatus) -> ProposalRecord {
         ProposalRecord {
             id: id.to_string(),
+            kind: ProposalKind::Update,
             status,
             source_run_id: None,
             sop_name: "deploy".to_string(),
             target_content_hash: None,
+            manifest_toml: "[sop]\nname = \"deploy\"\ndescription = \"Deploy\"\n".to_string(),
+            procedure_markdown: "## Steps\n\n1. **Deploy** - Do it.\n".to_string(),
             provenance: json!({}),
             created_at: "t".to_string(),
             updated_at: "t".to_string(),
+            status_reason: None,
+            applied_at: None,
+            applied_by: None,
+            rollback_path: None,
         }
     }
 

@@ -13,7 +13,7 @@ Status legend: **fork-only** (not submitted upstream) · **open** (PR open upstr
 | cost-pricing-catalog | `crates/zeroclaw-runtime/src/agent/pricing_catalog.rs` | #8380 | **adopted** (2026-06-29) |
 | cost-ledger-atomic | `crates/zeroclaw-config/src/cost/tracker.rs` | #8412 | **adopted** (2026-06-29) |
 | cost-org-rpc | `crates/zeroclaw-runtime/src/rpc/dispatch.rs` (cost/org + cost/query) | #8482 | **adopted** (2026-06-29) |
-| zerocode-cost-tab | `apps/zerocode/src/dashboard.rs`, `apps/zerocode/src/client.rs`, `apps/zerocode/locales/*/zerocode.ftl` | #8483 | **open** |
+| zerocode-cost-tab | `apps/zerocode/src/dashboard.rs`, `apps/zerocode/src/client.rs`, `apps/zerocode/locales/*/zerocode.ftl` | #8483 | **adopted** (2026-07-17) |
 | mnemos-session-backend | `crates/zeroclaw-infra/src/session_backend.rs`, `crates/zeroclaw-channels/src/orchestrator/mod.rs` (session-context), daemon wiring, `Cargo.lock` (ureq) | — | **fork-only** |
 | theme-pack | `web/src/contexts/themes.json` | — | **fork-only** |
 | alias-cli | `src/alias_cli/mod.rs` | — | **fork-only** |

@@ -41,8 +41,10 @@ mod mouse;
 mod panel;
 mod panels;
 mod quickstart_pane;
+mod sop_pane;
 mod theme;
 mod theme_picker;
+mod todo_tracker;
 mod turn_status;
 mod widgets;
 mod wire;
@@ -523,7 +525,7 @@ mod confirm_insecure_tls_tests {
     //! input → choice mapping and prompt content can be asserted
     //! deterministically without touching `stdin` / `stderr`.
     //!
-    //! Acceptance criterion coverage for issue #7693:
+    //! Insecure-TLS acceptance criterion coverage:
     //! 1. "Insecure TLS cannot be accepted without explicit confirmation"
     //!    — the empty / `n` / junk / uppercase-`N` / default branches all
     //!    return [`InsecureTlsChoice::Abort`].
@@ -638,7 +640,7 @@ mod confirm_insecure_tls_tests {
         );
     }
 
-    /// Static invariant from issue #7693 acceptance criterion 2:
+    /// Static invariant, insecure-TLS acceptance criterion 2:
     /// "Decline/abort paths leave no persisted insecure-TLS choice."
     ///
     /// `confirm_insecure_tls` is called from `run()` in a `match` that

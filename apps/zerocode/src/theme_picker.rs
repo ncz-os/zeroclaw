@@ -47,6 +47,14 @@ pub(crate) struct ThemePicker {
     status: Option<String>,
 }
 
+// Several methods on `ThemePicker` are wired for the future global overlay
+// call-site (`render_overlay`, `overlay_area`, `title`, `select_row`,
+// `item_count`); the current app loop does not yet invoke them, so the
+// overlay-side methods are flagged as dead-code while the picker itself is
+// reachable through `handle_key`. Allow the overlay-only surface until the
+// call-site lands — landing without `dead_code` would mislead a future reader
+// into thinking the surface is unreachable, when it is only awaiting wiring.
+#[allow(dead_code)]
 impl ThemePicker {
     pub(crate) fn new(config_dir: &Path) -> Self {
         let original = theme::active_raw();
