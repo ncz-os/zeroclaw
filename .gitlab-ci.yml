@@ -7,13 +7,13 @@
 # ncz-os ci-sim runs (fmt / clippy ci-all -D warnings / arch guards / check
 # all-features + no-default / nextest / cargo-deny). gitlab.com shared runners are
 # linux-only; mac/windows coverage stays on the GitHub matrix. CI is free under
-# the ncz-os OSS license. Toolchain pinned to 1.93.0 (matches upstream CI).
+# the ncz-os OSS license. Toolchain pinned to 1.96.1 (matches upstream CI).
 #
 # Lives on the `zoder-integration` patch stack (see docs/VENDORING.md), so it
 # validates our integration branch and MRs without diverging the mirrored master.
 
 default:
-  image: rust:1.93.0
+  image: rust:1.96.1
   cache:
     key:
       files: [Cargo.lock]
