@@ -744,6 +744,24 @@ pub fn create_memory_for_migration(
     )
 }
 
+/// Wrap an agent memory handle in the [`RetrievalPipeline`] decorator.
+///
+/// The decorator makes one hybrid backend-recall call per query. Its only
+/// add-on is an optional in-process hot cache, enabled when `[memory]
+/// retrieval_stages` names `"cache"`. The default carries no `"cache"`, so
+/// activating the decorator does not change default per-agent recall. The
+/// reserved `"fts"` / `"vector"` names and `fts_early_return_score` are inert
+/// until `Memory` exposes distinct FTS and vector operations.
+fn wrap_in_retrieval_pipeline(memory: Arc<dyn Memory>, config: &MemoryConfig) -> Arc<dyn Memory> {
+    let cache_enabled = config.retrieval_stages.iter().any(|stage| stage == "cache");
+    Arc::new(retrieval::RetrievalPipeline::new(
+        memory,
+        retrieval::RetrievalConfig {
+            cache_enabled,
+            ..retrieval::RetrievalConfig::default()
+        },
+    ))
+}
 pub async fn create_memory_for_agent(
     config: &zeroclaw_config::schema::Config,
     agent_alias: &str,
@@ -771,7 +789,7 @@ pub async fn create_memory_for_agent(
             });
         }
         let scoped = AgentScopedMarkdownMemory::new(agent_alias, own, peers);
-        return Ok(Arc::new(scoped));
+        return Ok(wrap_in_retrieval_pipeline(Arc::new(scoped), &config.memory));
     }
 
     // None branch: nothing to scope, no agents-table lookup needed.
@@ -797,7 +815,7 @@ pub async fn create_memory_for_agent(
     }
 
     let scoped = AgentScopedMemory::new(inner_arc, bound_id, allowlist_ids);
-    Ok(Arc::new(scoped))
+    Ok(wrap_in_retrieval_pipeline(Arc::new(scoped), &config.memory))
 }
 
 /// Factory: create an optional response cache from config.
@@ -1755,5 +1773,128 @@ mod tests {
         assert_eq!(value["severity_text"], "WARN");
         assert_eq!(value["attributes"]["provider_ref"], "custom.myembed");
         assert_eq!(value["attributes"]["provider_kind"], "custom");
+    }
+
+    // -- create_memory_for_agent x retrieval pipeline --------------
+
+    fn agent_config(tmp: &TempDir) -> zeroclaw_config::schema::Config {
+        let mut agents = std::collections::HashMap::new();
+        agents.insert(
+            "ops".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig::default(),
+        );
+        zeroclaw_config::schema::Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            agents,
+            ..zeroclaw_config::schema::Config::default()
+        }
+    }
+
+    /// The agent factory wraps the scoped handle in the retrieval decorator
+    /// without introducing a handle-local cache over the shared store.
+    #[tokio::test]
+    async fn create_memory_for_agent_keeps_cross_handle_reads_coherent() {
+        let tmp = TempDir::new().unwrap();
+        let config = agent_config(&tmp);
+
+        let handle_a = create_memory_for_agent(&config, "ops", None).await.unwrap();
+        let handle_b = create_memory_for_agent(&config, "ops", None).await.unwrap();
+
+        handle_a
+            .store("k1", "first fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let first = handle_a.recall("fact", 10, None, None, None).await.unwrap();
+        assert_eq!(first.len(), 1, "seed row must be recallable");
+
+        handle_b
+            .store("k2", "second fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let fresh_after_sibling_write =
+            handle_a.recall("fact", 10, None, None, None).await.unwrap();
+        assert_eq!(
+            fresh_after_sibling_write.len(),
+            2,
+            "a sibling write must be visible through an existing handle"
+        );
+
+        handle_a
+            .store("k3", "third fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let fresh = handle_a.recall("fact", 10, None, None, None).await.unwrap();
+        assert_eq!(fresh.len(), 3, "the decorator must preserve direct recall");
+    }
+
+    /// The reserved `"fts"` / `"vector"` stage names do not enable caching, so
+    /// recall stays coherent across handles exactly like the default.
+    #[tokio::test]
+    async fn factory_reserved_stages_do_not_cache() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = agent_config(&tmp);
+        config.memory.retrieval_stages = vec!["fts".to_string(), "vector".to_string()];
+
+        let handle_a = create_memory_for_agent(&config, "ops", None).await.unwrap();
+        let handle_b = create_memory_for_agent(&config, "ops", None).await.unwrap();
+
+        handle_a
+            .store("k1", "first fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle_a
+                .recall("fact", 10, None, None, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        handle_b
+            .store("k2", "second fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let after = handle_a.recall("fact", 10, None, None, None).await.unwrap();
+        assert_eq!(
+            after.len(),
+            2,
+            "reserved stages must not cache; a sibling write stays visible"
+        );
+    }
+
+    /// Opting the hot cache in via `retrieval_stages = ["cache"]` keeps a
+    /// handle coherent with its own writes (a mutation invalidates the cache).
+    #[tokio::test]
+    async fn factory_optin_cache_reflects_own_writes() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = agent_config(&tmp);
+        config.memory.retrieval_stages = vec!["cache".to_string()];
+
+        let handle = create_memory_for_agent(&config, "ops", None).await.unwrap();
+        handle
+            .store("k1", "first fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle
+                .recall("fact", 10, None, None, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        handle
+            .store("k2", "second fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let after = handle.recall("fact", 10, None, None, None).await.unwrap();
+        assert_eq!(
+            after.len(),
+            2,
+            "a handle must see its own writes even with the cache on"
+        );
     }
 }
