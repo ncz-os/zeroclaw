@@ -1,49 +1,41 @@
 //! Automatic media understanding pipeline for inbound channel messages.
-//!
-//! Pre-processes media attachments (audio, images, video) before the agent sees
-//! the message, enriching the text with human-readable annotations:
-//!
-//! - **Audio**: transcribed via the existing [`super::transcription`] infrastructure,
-//!   prepended as `[Audio transcription: ...]`.
-//! - **Images**: when a vision-capable provider is active, described as `[Image: <description>]`.
-//!   Falls back to `[Image: attached]` when vision is unavailable.
-//! - **Video**: summarised as `[Video summary: ...]` when an API is available,
-//!   otherwise `[Video: attached]`.
-//!
-//! The pipeline is **opt-in** via `[media_pipeline] enabled = true` in config.
 
-use zeroclaw_config::schema::{MediaPipelineConfig, TranscriptionConfig};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::borrow::Cow;
+use zeroclaw_config::schema::MediaPipelineConfig;
+
+use super::super::transcription::TranscriptionManager;
 
 // Re-export media types from zeroclaw-types for backwards compatibility.
 pub use zeroclaw_api::media::{MediaAttachment, MediaKind};
 
 /// The media understanding pipeline.
-///
 /// Consumes a message's text and attachments, returning enriched text with
 /// media annotations prepended.
 pub struct MediaPipeline<'a> {
     config: &'a MediaPipelineConfig,
-    transcription_config: &'a TranscriptionConfig,
+    transcription_manager: Option<&'a TranscriptionManager>,
     vision_available: bool,
 }
 
 impl<'a> MediaPipeline<'a> {
     /// Create a new pipeline. `vision_available` indicates whether the current
-    /// provider supports vision (image description).
+    /// model provider supports vision (image description). `transcription_manager`
+    /// is `None` when transcription is disabled at the channel level — audio
+    /// attachments fall back to `[Audio: attached]` annotations.
     pub fn new(
         config: &'a MediaPipelineConfig,
-        transcription_config: &'a TranscriptionConfig,
+        transcription_manager: Option<&'a TranscriptionManager>,
         vision_available: bool,
     ) -> Self {
         Self {
             config,
-            transcription_config,
+            transcription_manager,
             vision_available,
         }
     }
 
     /// Process a message's attachments and return enriched text.
-    ///
     /// If the pipeline is disabled via config, returns `original_text` unchanged.
     pub async fn process(&self, original_text: &str, attachments: &[MediaAttachment]) -> String {
         if !self.config.enabled || attachments.is_empty() {
@@ -93,16 +85,13 @@ impl<'a> MediaPipeline<'a> {
 
     /// Transcribe an audio attachment using the existing transcription infra.
     async fn process_audio(&self, attachment: &MediaAttachment) -> String {
-        if !self.transcription_config.enabled {
+        let Some(manager) = self.transcription_manager else {
             return "[Audio: attached]".to_string();
-        }
+        };
 
-        match super::transcription::transcribe_audio(
-            attachment.data.clone(),
-            &attachment.file_name,
-            self.transcription_config,
-        )
-        .await
+        match manager
+            .transcribe(&attachment.data, &attachment.file_name)
+            .await
         {
             Ok(text) => {
                 let trimmed = text.trim();
@@ -113,27 +102,19 @@ impl<'a> MediaPipeline<'a> {
                 }
             }
             Err(err) => {
-                tracing::warn!(
-                    file = %attachment.file_name,
-                    error = %err,
-                    "Media pipeline: audio transcription failed"
-                );
+                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"file": attachment.file_name, "error": format!("{}", err)})), "Media pipeline: audio transcription failed");
                 "[Audio: transcription failed]".to_string()
             }
         }
     }
 
-    /// Describe an image attachment.
-    ///
-    /// When vision is available, the image will be passed through to the
-    /// provider as an `[IMAGE:]` marker and described by the model in the
-    /// normal flow. Here we only add a placeholder annotation so the agent
-    /// knows an image is present.
     fn process_image(&self, attachment: &MediaAttachment) -> String {
         if self.vision_available {
+            let (mime, data) = image_payload_for_vision(attachment);
+            let b64 = STANDARD.encode(data.as_ref());
             format!(
-                "[Image: {} attached, will be processed by vision model]",
-                attachment.file_name
+                "[Image: {} attached, will be processed by vision model]\n[IMAGE:data:{};base64,{}]",
+                attachment.file_name, mime, b64
             )
         } else {
             format!("[Image: {} attached]", attachment.file_name)
@@ -141,12 +122,54 @@ impl<'a> MediaPipeline<'a> {
     }
 
     /// Summarize a video attachment.
-    ///
     /// Video analysis requires external APIs not currently integrated.
     /// For now we add a placeholder annotation.
     fn process_video(&self, attachment: &MediaAttachment) -> String {
         format!("[Video: {} attached]", attachment.file_name)
     }
+}
+
+fn image_payload_for_vision(attachment: &MediaAttachment) -> (String, Cow<'_, [u8]>) {
+    let mime = attachment.mime_type.as_deref().unwrap_or("image/jpeg");
+
+    #[cfg(feature = "image-normalization")]
+    if is_webp_attachment(attachment, mime) {
+        match webp_to_png(&attachment.data) {
+            Ok(png) => return ("image/png".to_string(), Cow::Owned(png)),
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "file": attachment.file_name,
+                            "error": format!("{}", err),
+                            "error_key": "media_pipeline_webp_to_png_failed",
+                        })),
+                    "Media pipeline: failed to normalize WebP image for vision"
+                );
+            }
+        }
+    }
+
+    (mime.to_string(), Cow::Borrowed(&attachment.data))
+}
+
+#[cfg(feature = "image-normalization")]
+fn is_webp_attachment(attachment: &MediaAttachment, mime: &str) -> bool {
+    mime.eq_ignore_ascii_case("image/webp")
+        || attachment
+            .file_name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("webp"))
+}
+
+#[cfg(feature = "image-normalization")]
+fn webp_to_png(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let image = image::load_from_memory_with_format(data, image::ImageFormat::WebP)?;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut cursor, image::ImageFormat::Png)?;
+    Ok(cursor.into_inner())
 }
 
 #[cfg(test)]
@@ -244,8 +267,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_pipeline_returns_original_text() {
         let config = default_pipeline_config(false);
-        let tc = TranscriptionConfig::default();
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let result = pipeline.process("hello", &[sample_audio()]).await;
         assert_eq!(result, "hello");
@@ -254,8 +276,7 @@ mod tests {
     #[tokio::test]
     async fn empty_attachments_returns_original_text() {
         let config = default_pipeline_config(true);
-        let tc = TranscriptionConfig::default();
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let result = pipeline.process("hello", &[]).await;
         assert_eq!(result, "hello");
@@ -264,35 +285,67 @@ mod tests {
     #[tokio::test]
     async fn image_annotation_with_vision() {
         let config = default_pipeline_config(true);
-        let tc = TranscriptionConfig::default();
-        let pipeline = MediaPipeline::new(&config, &tc, true);
+        let pipeline = MediaPipeline::new(&config, None, true);
 
         let result = pipeline.process("check this", &[sample_image()]).await;
         assert!(
             result.contains("[Image: photo.jpg attached, will be processed by vision model]"),
             "expected vision annotation, got: {result}"
         );
+        assert!(
+            result.contains("[IMAGE:data:image/jpeg;base64,"),
+            "expected image data marker, got: {result}"
+        );
         assert!(result.contains("check this"));
+    }
+
+    #[cfg(feature = "image-normalization")]
+    #[tokio::test]
+    async fn webp_image_is_normalized_to_png_for_vision() {
+        let config = default_pipeline_config(true);
+        let pipeline = MediaPipeline::new(&config, None, true);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let webp = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([255, 0, 0, 255]),
+        ));
+        webp.write_to(&mut cursor, image::ImageFormat::WebP)
+            .expect("test WebP should encode");
+
+        let sticker = MediaAttachment {
+            file_name: "sticker.webp".to_string(),
+            data: cursor.into_inner(),
+            mime_type: Some("image/webp".to_string()),
+        };
+
+        let result = pipeline.process("what is this?", &[sticker]).await;
+
+        assert!(result.contains("[IMAGE:data:image/png;base64,"));
+        assert!(!result.contains("[IMAGE:data:image/webp;base64,"));
+        assert!(result.contains("what is this?"));
     }
 
     #[tokio::test]
     async fn image_annotation_without_vision() {
         let config = default_pipeline_config(true);
-        let tc = TranscriptionConfig::default();
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let result = pipeline.process("check this", &[sample_image()]).await;
         assert!(
             result.contains("[Image: photo.jpg attached]"),
             "expected basic image annotation, got: {result}"
         );
+        assert!(
+            !result.contains("[IMAGE:data:"),
+            "non-vision path must not inline image data, got: {result}"
+        );
     }
 
     #[tokio::test]
     async fn video_annotation() {
         let config = default_pipeline_config(true);
-        let tc = TranscriptionConfig::default();
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let result = pipeline.process("watch", &[sample_video()]).await;
         assert!(
@@ -304,11 +357,7 @@ mod tests {
     #[tokio::test]
     async fn audio_without_transcription_enabled() {
         let config = default_pipeline_config(true);
-        let tc = TranscriptionConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let result = pipeline.process("", &[sample_audio()]).await;
         assert_eq!(result, "[Audio: attached]");
@@ -317,11 +366,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_attachments_produce_multiple_annotations() {
         let config = default_pipeline_config(true);
-        let tc = TranscriptionConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let attachments = vec![sample_audio(), sample_image(), sample_video()];
         let result = pipeline.process("context", &attachments).await;
@@ -349,8 +394,7 @@ mod tests {
             describe_images: false,
             summarize_video: false,
         };
-        let tc = TranscriptionConfig::default();
-        let pipeline = MediaPipeline::new(&config, &tc, false);
+        let pipeline = MediaPipeline::new(&config, None, false);
 
         let attachments = vec![sample_audio(), sample_image(), sample_video()];
         let result = pipeline.process("hello", &attachments).await;

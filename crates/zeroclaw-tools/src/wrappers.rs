@@ -1,30 +1,9 @@
 //! Generic tool wrappers for crosscutting concerns.
-//!
-//! Each wrapper implements [`Tool`] by delegating to an inner tool while
-//! applying one crosscutting concern around the `execute` call.  Wrappers
-//! compose: stack them at construction time in `tools/mod.rs` rather than
-//! repeating the same guard blocks inside every tool's `execute` method.
-//!
-//! # Composition order (outermost first)
-//!
-//! ```text
-//! RateLimitedTool
-//!   └─ PathGuardedTool
-//!        └─ <concrete tool>
-//! ```
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! let tool = RateLimitedTool::new(
-//!     PathGuardedTool::new(ShellTool::new(security.clone(), runtime), security.clone()),
-//!     security.clone(),
-//! );
-//! ```
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::attribution::{Attributable, Role};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::policy::SecurityPolicy;
 
 /// Type alias for a path-extraction closure used by [`PathGuardedTool`].
@@ -32,11 +11,6 @@ type PathExtractor = dyn Fn(&serde_json::Value) -> Option<String> + Send + Sync;
 
 // ── RateLimitedTool ───────────────────────────────────────────────────────────
 
-/// Wraps any [`Tool`] and enforces the [`SecurityPolicy`] rate limit.
-///
-/// Replaces the repeated `is_rate_limited()` / `record_action()` guard blocks
-/// previously inlined in every tool's `execute` method (~30 files, ~50 call
-/// sites).  The inner tool receives the call only when the rate limit allows it.
 pub struct RateLimitedTool<T: Tool> {
     inner: T,
     security: Arc<SecurityPolicy>,
@@ -45,6 +19,15 @@ pub struct RateLimitedTool<T: Tool> {
 impl<T: Tool> RateLimitedTool<T> {
     pub fn new(inner: T, security: Arc<SecurityPolicy>) -> Self {
         Self { inner, security }
+    }
+}
+
+impl<T: Tool> Attributable for RateLimitedTool<T> {
+    fn role(&self) -> Role {
+        self.inner.role()
+    }
+    fn alias(&self) -> &str {
+        self.inner.alias()
     }
 }
 
@@ -62,39 +45,39 @@ impl<T: Tool> Tool for RateLimitedTool<T> {
         self.inner.parameters_schema()
     }
 
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.inner.output_schema()
+    }
+
+    fn param_domains(&self) -> Vec<(&'static str, zeroclaw_api::tool::OptionDomain)> {
+        self.inner.param_domains()
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
 
-        if !self.security.record_action() {
+        let result = self.inner.execute(args).await?;
+
+        if result.success && !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
 
-        self.inner.execute(args).await
+        Ok(result)
     }
 }
 
 // ── PathGuardedTool ───────────────────────────────────────────────────────────
 
-/// Wraps any [`Tool`] and blocks calls whose arguments contain a forbidden path.
-///
-/// Replaces the `forbidden_path_argument()` guard blocks previously inlined in
-/// tools that accept a path-like argument (`shell`, `file_read`, `file_write`,
-/// `file_edit`, `pdf_read`, `content_search`, `glob_search`, `image_info`).
-///
-/// Path extraction is argument-name-driven: the wrapper inspects the `"path"`,
-/// `"command"`, `"pattern"`, and `"query"` fields of the JSON argument object.
-/// Tools whose path argument uses a different field name can pass a custom
-/// extractor at construction via [`PathGuardedTool::with_extractor`].
 pub struct PathGuardedTool<T: Tool> {
     inner: T,
     security: Arc<SecurityPolicy>,
@@ -134,6 +117,15 @@ impl<T: Tool> PathGuardedTool<T> {
     }
 }
 
+impl<T: Tool> Attributable for PathGuardedTool<T> {
+    fn role(&self) -> Role {
+        self.inner.role()
+    }
+    fn alias(&self) -> &str {
+        self.inner.alias()
+    }
+}
+
 #[async_trait]
 impl<T: Tool> Tool for PathGuardedTool<T> {
     fn name(&self) -> &str {
@@ -146,6 +138,14 @@ impl<T: Tool> Tool for PathGuardedTool<T> {
 
     fn parameters_schema(&self) -> serde_json::Value {
         self.inner.parameters_schema()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.inner.output_schema()
+    }
+
+    fn param_domains(&self) -> Vec<(&'static str, zeroclaw_api::tool::OptionDomain)> {
+        self.inner.param_domains()
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -166,7 +166,7 @@ impl<T: Tool> Tool for PathGuardedTool<T> {
             if let Some(path) = blocked {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!("Path blocked by security policy: {path}")),
                 });
             }
@@ -186,6 +186,8 @@ mod tests {
     use zeroclaw_config::autonomy::AutonomyLevel;
     use zeroclaw_config::policy::SecurityPolicy;
 
+    zeroclaw_api::mock_tool_attribution!(CountingTool);
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn policy(autonomy: AutonomyLevel) -> Arc<SecurityPolicy> {
@@ -194,6 +196,16 @@ mod tests {
             workspace_dir: std::env::temp_dir(),
             ..SecurityPolicy::default()
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn absolute_path_outside_workspace() -> &'static str {
+        r"C:\Windows\win.ini"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn absolute_path_outside_workspace() -> &'static str {
+        "/etc/passwd"
     }
 
     /// A minimal tool that records how many times `execute` was called.
@@ -298,7 +310,7 @@ mod tests {
         let (inner, counter) = CountingTool::new();
         let tool = PathGuardedTool::new(inner, policy(AutonomyLevel::Full));
         let result = tool
-            .execute(serde_json::json!({"command": "cat /etc/passwd"}))
+            .execute(serde_json::json!({"command": format!("cat {}", absolute_path_outside_workspace())}))
             .await
             .unwrap();
         assert!(!result.success);
@@ -333,7 +345,7 @@ mod tests {
                     .map(String::from)
             });
         let result = tool
-            .execute(serde_json::json!({"target": "/etc/shadow"}))
+            .execute(serde_json::json!({"target": absolute_path_outside_workspace()}))
             .await
             .unwrap();
         assert!(!result.success);
@@ -353,10 +365,99 @@ mod tests {
         let tool = RateLimitedTool::new(PathGuardedTool::new(inner, sec.clone()), sec);
 
         let blocked = tool
-            .execute(serde_json::json!({"path": "/etc/passwd"}))
+            .execute(serde_json::json!({"path": absolute_path_outside_workspace()}))
             .await
             .unwrap();
         assert!(!blocked.success);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_does_not_consume_budget_on_failure() {
+        // Inner tool that always reports failure (e.g. validation error).
+        // record_action() must NOT fire, so the budget stays at full and
+        // a subsequent successful call still goes through.
+        struct AlwaysFails;
+        impl ::zeroclaw_api::attribution::Attributable for AlwaysFails {
+            fn role(&self) -> ::zeroclaw_api::attribution::Role {
+                ::zeroclaw_api::attribution::Role::Tool(
+                    ::zeroclaw_api::attribution::ToolKind::Plugin,
+                )
+            }
+            fn alias(&self) -> &str {
+                <Self as Tool>::name(self)
+            }
+        }
+        #[async_trait]
+        impl Tool for AlwaysFails {
+            fn name(&self) -> &str {
+                "always_fails"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some("validation failed".into()),
+                })
+            }
+        }
+
+        let sec = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            workspace_dir: std::env::temp_dir(),
+            max_actions_per_hour: 1,
+            ..SecurityPolicy::default()
+        });
+        let failing = RateLimitedTool::new(AlwaysFails, sec.clone());
+
+        // Three failed calls — none should consume the single-slot budget.
+        for _ in 0..3 {
+            let r = failing.execute(serde_json::json!({})).await.unwrap();
+            assert!(!r.success);
+            assert!(r.error.unwrap().contains("validation failed"));
+        }
+
+        // Now a fresh successful tool wrapped against the same policy must
+        // still have its slot available.
+        let (success_inner, counter) = CountingTool::new();
+        let succeeding = RateLimitedTool::new(success_inner, sec);
+        let r = succeeding.execute(serde_json::json!({})).await.unwrap();
+        assert!(r.success);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn composed_wrappers_path_block_preserves_budget() {
+        // RateLimited(PathGuarded(CountingTool)) — PathGuard blocks the call,
+        // budget must NOT be consumed, so a subsequent allowed call still runs.
+        let sec = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            workspace_dir: std::env::temp_dir(),
+            max_actions_per_hour: 1,
+            ..SecurityPolicy::default()
+        });
+        let (inner, counter) = CountingTool::new();
+        let tool = RateLimitedTool::new(PathGuardedTool::new(inner, sec.clone()), sec);
+
+        let blocked = tool
+            .execute(serde_json::json!({"path": absolute_path_outside_workspace()}))
+            .await
+            .unwrap();
+        assert!(!blocked.success);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        // Budget intact: an allowed call should still pass.
+        let allowed = tool
+            .execute(serde_json::json!({"path": "src/main.rs"}))
+            .await
+            .unwrap();
+        assert!(allowed.success, "budget should still have a slot");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }

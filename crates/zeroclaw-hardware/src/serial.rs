@@ -1,17 +1,4 @@
 //! Hardware serial transport — newline-delimited JSON over USB CDC.
-//!
-//! Implements the [`Transport`] trait with **lazy port opening**: the port is
-//! opened for each `send()` call and closed immediately after the response is
-//! received. This means multiple tools can use the same device path without
-//! one holding the port exclusively.
-//!
-//! Wire protocol (ZeroClaw serial JSON):
-//! ```text
-//! Host → Device:  {"cmd":"gpio_write","params":{"pin":25,"value":1}}\n
-//! Device → Host:  {"ok":true,"data":{"pin":25,"value":1,"state":"HIGH"}}\n
-//! ```
-//!
-//! All I/O is wrapped in `tokio::time::timeout` — no blocking reads.
 
 use super::{
     protocol::{ZcCommand, ZcResponse},
@@ -33,11 +20,6 @@ const PING_TIMEOUT_MS: u64 = 300;
 /// Allowed serial device path prefixes — reject arbitrary paths for security.
 use crate::util::is_serial_path_allowed as is_path_allowed;
 
-/// Serial transport for ZeroClaw hardware devices.
-///
-/// The port is **opened lazily** on each `send()` call and released immediately
-/// after the response is read. This avoids exclusive-hold conflicts between
-/// multiple tools or processes.
 pub struct HardwareSerialTransport {
     port_path: String,
     baud_rate: u32,
@@ -45,7 +27,6 @@ pub struct HardwareSerialTransport {
 
 impl HardwareSerialTransport {
     /// Create a new lazy-open serial transport.
-    ///
     /// Does NOT open the port — that happens on the first `send()` call.
     pub fn new(port_path: impl Into<String>, baud_rate: u32) -> Self {
         Self {
@@ -64,13 +45,6 @@ impl HardwareSerialTransport {
         &self.port_path
     }
 
-    /// Attempt a ping handshake to verify ZeroClaw firmware is running.
-    ///
-    /// Opens the port, sends `{"cmd":"ping","params":{}}`, waits up to
-    /// `PING_TIMEOUT_MS` for a response with `data.firmware == "zeroclaw"`.
-    ///
-    /// Returns `true` if a ZeroClaw device responds, `false` otherwise.
-    /// This method never returns an error — discovery must not hang on failure.
     pub async fn ping_handshake(&self) -> bool {
         let ping = ZcCommand::simple("ping");
         let json = match serde_json::to_string(&ping) {
@@ -112,7 +86,12 @@ impl Transport for HardwareSerialTransport {
         let json = serde_json::to_string(cmd)
             .map_err(|e| TransportError::Protocol(format!("failed to serialize command: {e}")))?;
         // Log command name only — never log the full payload (may contain large or sensitive data).
-        tracing::info!(port = %self.port_path, cmd = %cmd.cmd, "serial send");
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_attrs(::serde_json::json!({"port": self.port_path, "cmd": cmd.cmd})),
+            "serial send"
+        );
 
         tokio::time::timeout(
             std::time::Duration::from_secs(SEND_TIMEOUT_SECS),
@@ -133,7 +112,6 @@ impl Transport for HardwareSerialTransport {
 }
 
 /// Open the port, write the command, read one response line, return the parsed response.
-///
 /// This is the inner function wrapped with `tokio::time::timeout` by the caller.
 /// Do NOT add a timeout here — the outer caller owns the deadline.
 async fn do_send(path: &str, baud: u32, json: &str) -> Result<ZcResponse, TransportError> {

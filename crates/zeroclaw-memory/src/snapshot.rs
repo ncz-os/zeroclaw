@@ -1,10 +1,4 @@
 //! Memory snapshot — export/import core memories as human-readable Markdown.
-//!
-//! **Atomic Soul Export**: dumps `MemoryCategory::Core` from SQLite into
-//! `MEMORY_SNAPSHOT.md` so the agent's "soul" is always Git-visible.
-//!
-//! **Auto-Hydration**: if `brain.db` is missing but `MEMORY_SNAPSHOT.md` exists,
-//! re-indexes all entries back into a fresh SQLite database.
 
 use anyhow::Result;
 use chrono::Local;
@@ -23,12 +17,15 @@ const SNAPSHOT_HEADER: &str = "# 🧠 ZeroClaw Memory Snapshot\n\n\
     > in this workspace and it will auto-hydrate from this file.\n\n";
 
 /// Export all `Core` memories from SQLite → `MEMORY_SNAPSHOT.md`.
-///
 /// Returns the number of entries exported.
 pub fn export_snapshot(workspace_dir: &Path) -> Result<usize> {
     let db_path = workspace_dir.join("memory").join("brain.db");
     if !db_path.exists() {
-        tracing::debug!("snapshot export skipped: brain.db does not exist");
+        ::zeroclaw_log::record!(
+            DEBUG,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            "snapshot export skipped: brain.db does not exist"
+        );
         return Ok(0);
     }
 
@@ -56,7 +53,11 @@ pub fn export_snapshot(workspace_dir: &Path) -> Result<usize> {
         .collect();
 
     if rows.is_empty() {
-        tracing::debug!("snapshot export: no core memories to export");
+        ::zeroclaw_log::record!(
+            DEBUG,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            "snapshot export: no core memories to export"
+        );
         return Ok(0);
     }
 
@@ -80,17 +81,20 @@ pub fn export_snapshot(workspace_dir: &Path) -> Result<usize> {
     let snapshot_path = snapshot_path(workspace_dir);
     fs::write(&snapshot_path, output)?;
 
-    tracing::info!(
-        "📸 Memory snapshot exported: {} core memories → {}",
-        rows.len(),
-        snapshot_path.display()
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+        &format!(
+            "📸 Memory snapshot exported: {} core memories → {}",
+            rows.len(),
+            snapshot_path.display().to_string()
+        )
     );
 
     Ok(rows.len())
 }
 
 /// Import memories from `MEMORY_SNAPSHOT.md` into SQLite.
-///
 /// Called during cold-boot when `brain.db` doesn't exist but the snapshot does.
 /// Returns the number of entries hydrated.
 pub fn hydrate_from_snapshot(workspace_dir: &Path) -> Result<usize> {
@@ -160,28 +164,38 @@ pub fn hydrate_from_snapshot(workspace_dir: &Path) -> Result<usize> {
                 hydrated += 1;
             }
             Ok(_) => {
-                tracing::debug!("hydrate: key '{key}' already exists, skipping");
+                ::zeroclaw_log::record!(
+                    DEBUG,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_attrs(::serde_json::json!({"key": key})),
+                    "hydrate: key '' already exists, skipping"
+                );
             }
             Err(e) => {
-                tracing::warn!("hydrate: failed to insert key '{key}': {e}");
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e), "key": key})),
+                    "hydrate: failed to insert key ''"
+                );
             }
         }
     }
 
-    tracing::info!(
-        "🧬 Memory hydration complete: {} entries restored from {}",
-        hydrated,
-        snapshot.display()
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+        &format!(
+            "🧬 Memory hydration complete: {} entries restored from {}",
+            hydrated,
+            snapshot.display().to_string()
+        )
     );
 
     Ok(hydrated)
 }
 
-/// Check if we should auto-hydrate on startup.
-///
-/// Returns `true` if:
-/// 1. `brain.db` does NOT exist (or is empty)
-/// 2. `MEMORY_SNAPSHOT.md` DOES exist
 pub fn should_hydrate(workspace_dir: &Path) -> bool {
     let db_path = workspace_dir.join("memory").join("brain.db");
     let snapshot = snapshot_path(workspace_dir);

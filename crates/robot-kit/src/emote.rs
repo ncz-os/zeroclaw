@@ -1,5 +1,4 @@
 //! Emote Tool - LED expressions and sound effects
-//!
 //! Control LED matrix/strips for robot "expressions" and play sounds.
 //! Makes the robot more engaging for kids!
 
@@ -154,7 +153,11 @@ impl EmoteTool {
         match output {
             Ok(out) if out.status.success() => Ok(()),
             _ => {
-                tracing::info!("LED display: {:?} (hardware not connected)", expr);
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                    &format!("LED display: {:?} (hardware not connected)", expr)
+                );
                 Ok(()) // Don't fail if LED hardware isn't available
             }
         }
@@ -165,7 +168,11 @@ impl EmoteTool {
         let sound_file = self.sounds_dir.join(format!("{}.wav", emotion));
 
         if !sound_file.exists() {
-            tracing::debug!("No sound file for emotion: {}", emotion);
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                &format!("No sound file for emotion: {}", emotion)
+            );
             return Ok(());
         }
 
@@ -189,10 +196,18 @@ impl EmoteTool {
             }
             "nod" => {
                 // Would control servo if available
-                tracing::info!("Animation: nod");
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                    "Animation: nod"
+                );
             }
             "shake" => {
-                tracing::info!("Animation: shake");
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                    "Animation: shake"
+                );
             }
             "dance" => {
                 // Cycle through expressions
@@ -254,10 +269,10 @@ impl Tool for EmoteTool {
     async fn execute(&self, args: Value) -> Result<ToolResult> {
         let expression_str = args["expression"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'expression' parameter"))?;
+            .ok_or_else(|| anyhow::Error::msg("Missing 'expression' parameter"))?;
 
         let expression = Expression::from_str(expression_str)
-            .ok_or_else(|| anyhow::anyhow!("Unknown expression: {}", expression_str))?;
+            .ok_or_else(|| anyhow::Error::msg(format!("Unknown expression: {}", expression_str)))?;
 
         let play_sound = args["sound"].as_bool().unwrap_or(true);
         let duration = args["duration"].as_u64().unwrap_or(3);

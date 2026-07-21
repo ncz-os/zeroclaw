@@ -1,17 +1,4 @@
 //! WebAuthn / FIDO2 hardware key authentication.
-//!
-//! Implements the Web Authentication API server-side flows for registration
-//! (attestation) and authentication (assertion) of hardware security keys
-//! (YubiKey, SoloKey, etc.) and platform authenticators.
-//!
-//! Credentials are serialized as JSON, encrypted via the existing [`SecretStore`],
-//! and persisted to a SQLite-backed credential database. Each user can register
-//! multiple credentials (e.g., primary key + backup key).
-//!
-//! This module intentionally avoids heavy third-party WebAuthn libraries to keep
-//! the dependency footprint small. It implements the essential challenge/response
-//! protocol using `ring` (already present) for signature verification and
-//! `base64`/`serde_json` for serialization.
 
 use crate::security::SecretStore;
 use anyhow::{Context, Result};
@@ -41,7 +28,7 @@ pub struct WebAuthnConfig {
     pub enabled: bool,
     /// Relying Party ID (typically the domain, e.g. "example.com").
     pub rp_id: String,
-    /// Relying Party origin URL (e.g. "https://example.com").
+    /// Relying Party origin URL (e.g. `"https://example.com"`).
     pub rp_origin: String,
     /// Human-readable relying party display name.
     pub rp_name: String,
@@ -190,7 +177,6 @@ pub struct AuthenticateCredentialResponse {
 // ── WebAuthnManager ─────────────────────────────────────────────
 
 /// Manages WebAuthn registration and authentication flows.
-///
 /// Credentials are encrypted via [`SecretStore`] and persisted to a JSON
 /// file alongside the secret store.
 pub struct WebAuthnManager {
@@ -202,7 +188,6 @@ pub struct WebAuthnManager {
 
 impl WebAuthnManager {
     /// Create a new `WebAuthnManager`.
-    ///
     /// `storage_dir` is the directory where the encrypted credentials file
     /// will be stored (typically `~/.zeroclaw/`).
     pub fn new(config: WebAuthnConfig, secret_store: Arc<SecretStore>, storage_dir: &Path) -> Self {
@@ -215,7 +200,6 @@ impl WebAuthnManager {
     }
 
     /// Begin a WebAuthn registration ceremony.
-    ///
     /// Returns the options to send to the browser and the server-side state
     /// to keep until `finish_registration` is called.
     pub fn start_registration(
@@ -267,7 +251,6 @@ impl WebAuthnManager {
     }
 
     /// Complete a WebAuthn registration ceremony.
-    ///
     /// Validates the client response against the registration state,
     /// extracts the public key, and stores the credential.
     pub fn finish_registration(
@@ -349,7 +332,6 @@ impl WebAuthnManager {
     }
 
     /// Begin a WebAuthn authentication ceremony.
-    ///
     /// Returns the options to send to the browser and the server-side state
     /// to keep until `finish_authentication` is called.
     pub fn start_authentication(
@@ -395,7 +377,6 @@ impl WebAuthnManager {
     }
 
     /// Complete a WebAuthn authentication ceremony.
-    ///
     /// Validates the assertion signature against the stored public key
     /// and updates the sign counter for clone detection.
     pub fn finish_authentication(
@@ -416,7 +397,16 @@ impl WebAuthnManager {
             .flatten()
             .find(|c| c.credential_id == response.id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Credential not found: {}", response.id))?;
+            .ok_or_else(|| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"credential_id": response.id})),
+                    "webauthn verify refused: credential id not in store"
+                );
+                anyhow::Error::msg(format!("Credential not found: {}", response.id))
+            })?;
 
         // 3. Validate client data JSON
         let client_data_bytes = URL_SAFE_NO_PAD
@@ -519,9 +509,15 @@ impl WebAuthnManager {
 
     fn generate_challenge(&self) -> Result<String> {
         let mut buf = [0u8; CHALLENGE_LEN];
-        self.rng
-            .fill(&mut buf)
-            .map_err(|_| anyhow::anyhow!("Failed to generate random challenge"))?;
+        self.rng.fill(&mut buf).map_err(|_| {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                "webauthn challenge: RNG fill failed"
+            );
+            anyhow::Error::msg("Failed to generate random challenge")
+        })?;
         Ok(URL_SAFE_NO_PAD.encode(buf))
     }
 
@@ -591,14 +587,6 @@ impl WebAuthnManager {
 
 // ── Attestation parsing ─────────────────────────────────────────
 
-/// Extract the public key from an attestation object.
-///
-/// For the "none" attestation format used by this implementation, the
-/// attestation object contains a simplified JSON structure with the
-/// public key in uncompressed P-256 format (65 bytes: 0x04 || x || y)
-/// or DER-encoded SubjectPublicKeyInfo.
-///
-/// Returns `(public_key_bytes, sign_count)`.
 fn extract_public_key_from_attestation(attestation_bytes: &[u8]) -> Result<(Vec<u8>, u32)> {
     // Try JSON format first (from our enrollment UI)
     if let Ok(att) = serde_json::from_slice::<AttestationObject>(attestation_bytes) {
@@ -648,13 +636,6 @@ struct AttestationObject {
     sign_count: Option<u32>,
 }
 
-/// Extract a P-256 uncompressed point from a COSE key map.
-///
-/// Minimal COSE-key parsing for EC2 / P-256 keys. The COSE key is
-/// CBOR-encoded; we look for the x (-2) and y (-3) coordinates.
-///
-/// For simplicity, we accept the raw uncompressed point format
-/// (0x04 || x || y, 65 bytes) directly if the COSE bytes start with 0x04.
 fn extract_p256_from_cose(cose: &[u8]) -> Result<Vec<u8>> {
     // If it starts with 0x04 and is 65 bytes, it's already uncompressed P-256
     if cose.len() >= 65 && cose[0] == 0x04 {
@@ -670,33 +651,23 @@ fn extract_p256_from_cose(cose: &[u8]) -> Result<Vec<u8>> {
 
 // ── Signature verification ──────────────────────────────────────
 
-/// Verify an ES256 (ECDSA P-256 + SHA-256) signature.
-///
-/// `public_key` must be either:
-/// - 65-byte uncompressed P-256 point (0x04 || x || y)
-/// - DER-encoded SubjectPublicKeyInfo
 fn verify_es256_signature(public_key: &[u8], message: &[u8], sig: &[u8]) -> Result<()> {
     // ring's UnparsedPublicKey expects the raw uncompressed point for P-256
     // (not wrapped in SPKI). If we have SPKI, we'd need to extract the point.
     // For our use case the stored key is always the raw uncompressed point.
     let pk = signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, public_key);
 
-    pk.verify(message, sig)
-        .map_err(|_| anyhow::anyhow!("WebAuthn signature verification failed"))
+    pk.verify(message, sig).map_err(|_| {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+            "WebAuthn signature verification failed"
+        );
+        anyhow::Error::msg("WebAuthn signature verification failed")
+    })
 }
 
-/// Encode a raw P-256 uncompressed point as DER SubjectPublicKeyInfo.
-///
-/// The resulting structure is:
-/// ```asn1
-/// SEQUENCE {
-///   SEQUENCE {
-///     OID 1.2.840.10045.2.1 (ecPublicKey)
-///     OID 1.2.840.10045.3.1.7 (prime256v1 / P-256)
-///   }
-///   BIT STRING <uncompressed point>
-/// }
-/// ```
 #[cfg(test)]
 fn encode_p256_spki(uncompressed_point: &[u8]) -> Vec<u8> {
     // Fixed DER prefix for P-256 SubjectPublicKeyInfo

@@ -1,5 +1,4 @@
 //! Sense Tool - LIDAR, motion sensors, ultrasonic distance
-//!
 //! Provides environmental awareness through various sensors.
 //! Supports multiple backends: direct GPIO, ROS2 topics, or mock.
 
@@ -132,7 +131,12 @@ impl SenseTool {
             }
             _ => {
                 // Fallback to mock if hardware unavailable
-                tracing::warn!("RPLidar unavailable, using mock data");
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                    "RPLidar unavailable, using mock data"
+                );
                 self.scan_mock().await
             }
         }
@@ -267,7 +271,7 @@ impl Tool for SenseTool {
     async fn execute(&self, args: Value) -> Result<ToolResult> {
         let action = args["action"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+            .ok_or_else(|| anyhow::Error::msg("Missing 'action' parameter"))?;
 
         match action {
             "scan" => {

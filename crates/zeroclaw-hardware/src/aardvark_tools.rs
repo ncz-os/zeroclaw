@@ -1,14 +1,5 @@
 //! Aardvark hardware tools — I2C, SPI, and GPIO operations via the Total Phase
 //! Aardvark USB adapter.
-//!
-//! All tools follow the same pattern as the built-in GPIO tools:
-//! 1. Accept an optional `device` alias parameter.
-//! 2. Resolve the Aardvark device from the [`DeviceRegistry`].
-//! 3. Build a [`ZcCommand`] and send it through the registered transport.
-//! 4. Return a [`ToolResult`] with human-readable output.
-//!
-//! These tools are only registered when at least one Aardvark adapter is
-//! detected at startup (see [`DeviceRegistry::has_aardvark`]).
 
 use super::device::DeviceRegistry;
 use super::protocol::ZcCommand;
@@ -16,12 +7,19 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use zeroclaw_api::attribution::ToolKind;
 use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool_attribution;
+
+tool_attribution!(I2cScanTool, ToolKind::Plugin);
+tool_attribution!(I2cReadTool, ToolKind::Plugin);
+tool_attribution!(I2cWriteTool, ToolKind::Plugin);
+tool_attribution!(SpiTransferTool, ToolKind::Plugin);
+tool_attribution!(GpioAardvarkTool, ToolKind::Plugin);
 
 // ── Factory ───────────────────────────────────────────────────────────────────
 
 /// Build the five Aardvark hardware tools.
-///
 /// Called from [`ToolRegistry::load`] when an Aardvark adapter is present.
 pub fn aardvark_tools(devices: Arc<RwLock<DeviceRegistry>>) -> Vec<Box<dyn Tool>> {
     vec![
@@ -36,7 +34,6 @@ pub fn aardvark_tools(devices: Arc<RwLock<DeviceRegistry>>) -> Vec<Box<dyn Tool>
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Resolve the Aardvark device from args and return an owned `DeviceContext`.
-///
 /// Thin wrapper so individual tool `execute` methods don't duplicate the logic.
 async fn resolve(
     registry: &Arc<RwLock<DeviceRegistry>>,
@@ -45,7 +42,7 @@ async fn resolve(
     let reg = registry.read().await;
     reg.resolve_aardvark_device(args).map_err(|msg| ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some(msg),
     })
 }
@@ -114,13 +111,13 @@ impl Tool for I2cScanTool {
                 };
                 Ok(ToolResult {
                     success: true,
-                    output,
+                    output: output.into(),
                     error: None,
                 })
             }
             Ok(resp) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(
                     resp.error
                         .unwrap_or_else(|| "i2c_scan: device returned ok:false".to_string()),
@@ -128,7 +125,7 @@ impl Tool for I2cScanTool {
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("transport error: {e}")),
             }),
         }
@@ -191,7 +188,7 @@ impl Tool for I2cReadTool {
             None => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("missing required parameter: addr".to_string()),
                 });
             }
@@ -224,13 +221,13 @@ impl Tool for I2cReadTool {
                     .unwrap_or_else(|| "?".to_string());
                 Ok(ToolResult {
                     success: true,
-                    output: format!("I2C read from addr {addr:#04x}: [{hex}]"),
+                    output: format!("I2C read from addr {addr:#04x}: [{hex}]").into(),
                     error: None,
                 })
             }
             Ok(resp) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(
                     resp.error
                         .unwrap_or_else(|| "i2c_read: device returned ok:false".to_string()),
@@ -238,7 +235,7 @@ impl Tool for I2cReadTool {
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("transport error: {e}")),
             }),
         }
@@ -296,7 +293,7 @@ impl Tool for I2cWriteTool {
             None => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("missing required parameter: addr".to_string()),
                 });
             }
@@ -306,7 +303,7 @@ impl Tool for I2cWriteTool {
             None => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("missing required parameter: bytes".to_string()),
                 });
             }
@@ -328,13 +325,13 @@ impl Tool for I2cWriteTool {
                     .unwrap_or(bytes.len() as u64);
                 Ok(ToolResult {
                     success: true,
-                    output: format!("I2C write to addr {addr:#04x}: {n} byte(s) written"),
+                    output: format!("I2C write to addr {addr:#04x}: {n} byte(s) written").into(),
                     error: None,
                 })
             }
             Ok(resp) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(
                     resp.error
                         .unwrap_or_else(|| "i2c_write: device returned ok:false".to_string()),
@@ -342,7 +339,7 @@ impl Tool for I2cWriteTool {
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("transport error: {e}")),
             }),
         }
@@ -397,7 +394,7 @@ impl Tool for SpiTransferTool {
             None => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("missing required parameter: bytes".to_string()),
                 });
             }
@@ -425,13 +422,13 @@ impl Tool for SpiTransferTool {
                     .unwrap_or_else(|| "?".to_string());
                 Ok(ToolResult {
                     success: true,
-                    output: format!("SPI transfer complete. Received: [{hex}]"),
+                    output: format!("SPI transfer complete. Received: [{hex}]").into(),
                     error: None,
                 })
             }
             Ok(resp) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(
                     resp.error
                         .unwrap_or_else(|| "spi_transfer: device returned ok:false".to_string()),
@@ -439,7 +436,7 @@ impl Tool for SpiTransferTool {
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("transport error: {e}")),
             }),
         }
@@ -449,7 +446,6 @@ impl Tool for SpiTransferTool {
 // ── GpioAardvarkTool ──────────────────────────────────────────────────────────
 
 /// Tool: set or read the Aardvark adapter's GPIO pins.
-///
 /// The Aardvark has 8 GPIO pins accessible via the 10-pin expansion header.
 /// Each pin can be configured as input or output via bitmasks.
 pub struct GpioAardvarkTool {
@@ -506,7 +502,7 @@ impl Tool for GpioAardvarkTool {
             None => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("missing required parameter: action".to_string()),
                 });
             }
@@ -530,7 +526,7 @@ impl Tool for GpioAardvarkTool {
             other => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("unknown action '{other}'; use 'set' or 'get'")),
                 });
             }
@@ -552,13 +548,13 @@ impl Tool for GpioAardvarkTool {
                 };
                 Ok(ToolResult {
                     success: true,
-                    output,
+                    output: output.into(),
                     error: None,
                 })
             }
             Ok(resp) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(
                     resp.error
                         .unwrap_or_else(|| "gpio_aardvark: device returned ok:false".to_string()),
@@ -566,9 +562,27 @@ impl Tool for GpioAardvarkTool {
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("transport error: {e}")),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::AARDVARK_TOOLS;
+
+    #[test]
+    fn aardvark_tool_names_match_catalog() {
+        let devices = Arc::new(RwLock::new(DeviceRegistry::new()));
+        let tools = aardvark_tools(devices);
+        let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        names.push("datasheet");
+        names.sort_unstable();
+        let mut catalog: Vec<&str> = AARDVARK_TOOLS.to_vec();
+        catalog.sort_unstable();
+        assert_eq!(names, catalog);
     }
 }

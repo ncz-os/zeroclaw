@@ -1,5 +1,4 @@
 //! Flash ZeroClaw Arduino firmware via arduino-cli.
-//!
 //! Ensures arduino-cli is available (installs via brew on macOS if missing),
 //! installs the AVR core, compiles and uploads the base firmware.
 
@@ -7,7 +6,10 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 /// ZeroClaw Arduino Uno base firmware (capabilities, gpio_read, gpio_write).
-const FIRMWARE_INO: &str = include_str!("../../firmware/arduino/arduino.ino");
+const FIRMWARE_INO: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../firmware/arduino/arduino.ino"
+));
 
 const FQBN: &str = "arduino:avr:uno";
 const SKETCH_NAME: &str = "arduino";

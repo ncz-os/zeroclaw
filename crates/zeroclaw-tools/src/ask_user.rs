@@ -1,10 +1,4 @@
 //! Interactive user prompting tool for cross-channel confirmations.
-//!
-//! Exposes `ask_user` as an agent-callable tool that sends a question to a
-//! messaging channel and waits for the user's response. The tool holds a
-//! late-binding channel map handle that is populated once channels are
-//! initialized (after tool construction). This mirrors the pattern used by
-//! [`ReactionTool`](super::reaction::ReactionTool).
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -12,7 +6,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::policy::ToolOperation;
 
@@ -29,24 +23,9 @@ pub struct AskUserTool {
 }
 
 impl AskUserTool {
-    /// Create a new ask_user tool with an empty channel map.
-    /// Call [`channel_map_handle`] and write to the returned handle once channels
-    /// are available.
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self {
-            security,
-            channels: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// Return the shared handle so callers can populate it after channel init.
-    pub fn channel_map_handle(&self) -> ChannelMapHandle {
-        Arc::clone(&self.channels)
-    }
-
-    /// Convenience: populate the channel map from a pre-built map.
-    pub fn populate(&self, map: HashMap<String, Arc<dyn Channel>>) {
-        *self.channels.write() = map;
+    /// Create a new ask_user tool using the given channel map.
+    pub fn new(security: Arc<SecurityPolicy>, channels: ChannelMapHandle) -> Self {
+        Self { security, channels }
     }
 }
 
@@ -113,7 +92,7 @@ impl Tool for AskUserTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!("Action blocked: {e}")),
             });
         }
@@ -124,7 +103,16 @@ impl Tool for AskUserTool {
             .and_then(|v| v.as_str())
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'question' parameter"))?
+            .ok_or_else(|| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"param": "question"})),
+                    "ask_user: missing question parameter"
+                );
+                anyhow::Error::msg("Missing 'question' parameter")
+            })?
             .to_string();
 
         let choices: Option<Vec<String>> = args.get("choices").and_then(|v| {
@@ -153,27 +141,84 @@ impl Tool for AskUserTool {
             if channels.is_empty() {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some("No channels available yet (channels not initialized)".to_string()),
                 });
             }
             if let Some(ref name) = requested_channel {
                 let ch = channels.get(name.as_str()).cloned().ok_or_else(|| {
-                    let available: Vec<String> = channels.keys().cloned().collect();
-                    anyhow::anyhow!(
-                        "Channel '{}' not found. Available: {}",
-                        name,
-                        available.join(", ")
-                    )
+                    let available = channels.keys().cloned().collect::<Vec<_>>().join(", ");
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "channel_requested": name,
+                                "available": &available,
+                            })),
+                        "ask_user: requested channel not found"
+                    );
+                    anyhow::Error::msg(format!(
+                        "Channel '{name}' not found. Available: {available}"
+                    ))
                 })?;
                 (name.clone(), ch)
             } else {
                 let (name, ch) = channels.iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("No channels available. Configure at least one channel.")
+                    ::zeroclaw_log::record!(
+                        ERROR,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"missing": "channels"})),
+                        "ask_user: no channels configured"
+                    );
+                    anyhow::Error::msg("No channels available. Configure at least one channel.")
                 })?;
                 (name.clone(), ch.clone())
             }
         };
+
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+
+        // Prefer the channel's native structured-choice flow when choices are
+        // present (e.g. ACP `session/request_permission`, Telegram inline
+        // keyboard). Channels that don't implement it return `Ok(None)` and
+        // we fall through to the generic send + listen path.
+        if let Some(ref choices_vec) = choices
+            && !choices_vec.is_empty()
+        {
+            match channel
+                .request_choice(&question, choices_vec, timeout)
+                .await
+            {
+                Ok(Some(answer)) => {
+                    return Ok(ToolResult {
+                        success: true,
+                        output: answer.into(),
+                        error: None,
+                    });
+                }
+                Ok(None) => { /* fall through to send+listen */ }
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: ToolOutput::default(),
+                        error: Some(format!(
+                            "Failed to ask question on channel '{channel_name}': {e}"
+                        )),
+                    });
+                }
+            }
+        } else if !channel.supports_free_form_ask() {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "Channel '{channel_name}' requires `choices` for ask_user \
+                     (free-form questions await ACP elicitation Phase 2)"
+                )),
+            });
+        }
 
         // Format and send the question
         let text = format_question(&question, choices.as_deref());
@@ -181,7 +226,7 @@ impl Tool for AskUserTool {
         if let Err(e) = channel.send(&msg).await {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!(
                     "Failed to send question to channel '{channel_name}': {e}"
                 )),
@@ -190,11 +235,10 @@ impl Tool for AskUserTool {
 
         // Listen for user response with timeout
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ChannelMessage>(1);
-        let timeout = std::time::Duration::from_secs(timeout_secs);
 
         // Spawn a listener task on the channel
         let listen_channel = Arc::clone(&channel);
-        let listen_handle = tokio::spawn(async move { listen_channel.listen(tx).await });
+        let listen_handle = zeroclaw_spawn::spawn!(async move { listen_channel.listen(tx).await });
 
         let response = tokio::time::timeout(timeout, rx.recv()).await;
 
@@ -204,17 +248,17 @@ impl Tool for AskUserTool {
         match response {
             Ok(Some(msg)) => Ok(ToolResult {
                 success: true,
-                output: msg.content,
+                output: msg.content.into(),
                 error: None,
             }),
             Ok(None) => Ok(ToolResult {
                 success: false,
-                output: "TIMEOUT".to_string(),
+                output: "TIMEOUT".to_string().into(),
                 error: Some("Channel closed before receiving a response".to_string()),
             }),
             Err(_) => Ok(ToolResult {
                 success: false,
-                output: "TIMEOUT".to_string(),
+                output: "TIMEOUT".to_string().into(),
                 error: Some(format!(
                     "No response received within {timeout_secs} seconds"
                 )),
@@ -239,6 +283,17 @@ mod tests {
                 channel_name: name.to_string(),
                 sent: Arc::new(RwLock::new(Vec::new())),
             }
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for SilentChannel {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Channel(
+                ::zeroclaw_api::attribution::ChannelKind::Webhook,
+            )
+        }
+        fn alias(&self) -> &str {
+            "test"
         }
     }
 
@@ -280,6 +335,17 @@ mod tests {
         }
     }
 
+    impl ::zeroclaw_api::attribution::Attributable for RespondingChannel {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Channel(
+                ::zeroclaw_api::attribution::ChannelKind::Webhook,
+            )
+        }
+        fn alias(&self) -> &str {
+            "test"
+        }
+    }
+
     #[async_trait]
     impl Channel for RespondingChannel {
         fn name(&self) -> &str {
@@ -301,10 +367,14 @@ mod tests {
                 reply_target: "user".to_string(),
                 content: self.response.clone(),
                 channel: self.channel_name.clone(),
+                channel_alias: None,
                 timestamp: 1000,
                 thread_ts: None,
                 interruption_scope_id: None,
                 attachments: vec![],
+                subject: None,
+
+                ..Default::default()
             };
             let _ = tx.send(msg).await;
             Ok(())
@@ -312,20 +382,24 @@ mod tests {
     }
 
     fn make_tool_with_channels(channels: Vec<(&str, Arc<dyn Channel>)>) -> AskUserTool {
-        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()));
-        let map: HashMap<String, Arc<dyn Channel>> = channels
-            .into_iter()
-            .map(|(name, ch)| (name.to_string(), ch))
-            .collect();
-        tool.populate(map);
-        tool
+        let handle = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut map = handle.write();
+            for (name, ch) in channels {
+                map.insert(name.to_string(), ch);
+            }
+        }
+        AskUserTool::new(Arc::new(SecurityPolicy::default()), handle)
     }
 
     // ── Metadata tests ──
 
     #[test]
     fn tool_name_and_description() {
-        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = AskUserTool::new(
+            Arc::new(SecurityPolicy::default()),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
         assert_eq!(tool.name(), "ask_user");
         assert!(!tool.description().is_empty());
         assert!(tool.description().contains("question"));
@@ -333,7 +407,10 @@ mod tests {
 
     #[test]
     fn parameter_schema_validation() {
-        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = AskUserTool::new(
+            Arc::new(SecurityPolicy::default()),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
         let schema = tool.parameters_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["question"].is_object());
@@ -350,7 +427,10 @@ mod tests {
 
     #[test]
     fn spec_matches_metadata() {
-        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = AskUserTool::new(
+            Arc::new(SecurityPolicy::default()),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
         let spec = tool.spec();
         assert_eq!(spec.name, "ask_user");
         assert_eq!(spec.description, tool.description());
@@ -401,7 +481,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty_channels_returns_not_initialized() {
-        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()));
+        let tool = AskUserTool::new(
+            Arc::new(SecurityPolicy::default()),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
         let result = tool.execute(json!({ "question": "Hello?" })).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_deref().unwrap().contains("not initialized"));
@@ -476,14 +559,14 @@ mod tests {
 
     #[tokio::test]
     async fn channel_map_handle_allows_late_binding() {
-        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()));
-        let handle = tool.channel_map_handle();
+        let handle = Arc::new(RwLock::new(HashMap::new()));
+        let tool = AskUserTool::new(Arc::new(SecurityPolicy::default()), handle.clone());
 
         // Initially empty — tool reports not initialized
         let result = tool.execute(json!({ "question": "Hello?" })).await.unwrap();
         assert!(!result.success);
 
-        // Populate via the handle
+        // Populate via the shared handle
         {
             let mut map = handle.write();
             map.insert(

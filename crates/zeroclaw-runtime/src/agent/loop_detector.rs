@@ -1,14 +1,4 @@
 //! Loop detection guardrail for the agent tool-call loop.
-//!
-//! Monitors a sliding window of recent tool calls and their results to detect
-//! three repetitive patterns that indicate the agent is stuck:
-//!
-//! 1. **Exact repeat** — same tool + args called 3+ times consecutively.
-//! 2. **Ping-pong** — two tools alternating (A->B->A->B) for 4+ cycles.
-//! 3. **No progress** — same tool called 5+ times with different args but
-//!    identical result hash each time.
-//!
-//! Detection triggers escalating responses: `Warning` -> `Block` -> `Break`.
 
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
@@ -119,11 +109,6 @@ impl LoopDetector {
         }
     }
 
-    /// Record a completed tool call and check for loop patterns.
-    ///
-    /// * `name` — tool name (e.g. `"shell"`, `"file_read"`).
-    /// * `args` — the arguments JSON value sent to the tool.
-    /// * `result` — the tool's textual output.
     pub fn record(
         &mut self,
         name: &str,
@@ -160,12 +145,6 @@ impl LoopDetector {
         LoopDetectionResult::Ok
     }
 
-    /// Pattern 1: Same tool + same args called N+ times consecutively.
-    ///
-    /// Escalation:
-    /// - N == max_repeats     -> Warning
-    /// - N == max_repeats + 1 -> Block
-    /// - N >= max_repeats + 2 -> Break (circuit breaker)
     fn detect_exact_repeat(&self) -> Option<LoopDetectionResult> {
         let max = self.config.max_repeats;
         if self.window.len() < max {
@@ -266,7 +245,8 @@ impl LoopDetector {
     }
 
     /// Pattern 3: Same tool called 5+ times (with different args each time)
-    /// but producing the exact same result hash every time.
+    /// but producing the exact same result hash every time, counted across the
+    /// whole window so interleaved unrelated calls do not reset the streak.
     fn detect_no_progress(&self) -> Option<LoopDetectionResult> {
         const MIN_CALLS: usize = 5;
 
@@ -275,11 +255,13 @@ impl LoopDetector {
         }
 
         let last = self.window.back()?;
+        // the stuck agent ran 43 near-duplicate shell calls returning
+        // byte-identical output, interleaved with other tools; filter (not a
+        // consecutive take_while) is what lets that non-adjacent run be counted.
         let same_tool_same_result: Vec<&ToolCallRecord> = self
             .window
             .iter()
-            .rev()
-            .take_while(|r| r.name == last.name && r.result_hash == last.result_hash)
+            .filter(|r| r.name == last.name && r.result_hash == last.result_hash)
             .collect();
 
         let count = same_tool_same_result.len();
@@ -398,13 +380,13 @@ mod tests {
 
         det.record("tool_a", &args, "r1");
         det.record("tool_a", &args, "r1");
-        // Interject a different tool — resets the streak.
+        // Interject a different tool — resets the consecutive exact-repeat streak.
         det.record("tool_b", &json!({}), "r2");
         det.record("tool_a", &args, "r1");
-        det.record("tool_a", &args, "r1");
-        // Only 2 consecutive now, should be Ok.
+        // Only 2 consecutive exact repeats now; a different-result call must
+        // not trip exact-repeat (and distinct results keep no-progress quiet).
         assert_eq!(
-            det.record("tool_a", &json!({"x": 999}), "r1"),
+            det.record("tool_a", &json!({"x": 999}), "r_distinct"),
             LoopDetectionResult::Ok
         );
     }
@@ -529,6 +511,35 @@ mod tests {
             let args = json!({"q": format!("v{i}")});
             let result = det.record("search", &args, &format!("result_{i}"));
             assert_eq!(result, LoopDetectionResult::Ok, "iteration {i}");
+        }
+    }
+
+    #[test]
+    fn no_progress_triggered_when_interleaved_with_other_calls() {
+        // same tool + same result repeated non-consecutively, with
+        // varied unrelated calls interleaved, must still be detected. The old
+        // take_while logic reset the streak on any interleaved call.
+        let mut det = LoopDetector::new(default_config());
+
+        let mut last = LoopDetectionResult::Ok;
+        for i in 0..5 {
+            let args = json!({"q": format!("v{i}")});
+            last = det.record("search", &args, "no results found");
+            // Interleave a distinct unrelated tool each time so neither
+            // ping-pong nor exact-repeat fires before no-progress.
+            det.record(
+                &format!("reader_{i}"),
+                &json!({"path": format!("/f{i}")}),
+                &format!("body_{i}"),
+            );
+        }
+
+        match last {
+            LoopDetectionResult::Warning(msg) => {
+                assert!(msg.contains("search"), "got: {msg}");
+                assert!(msg.contains("identical results"), "got: {msg}");
+            }
+            other => panic!("expected Warning on 5th interleaved probe, got {other:?}"),
         }
     }
 

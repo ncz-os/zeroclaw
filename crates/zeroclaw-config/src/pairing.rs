@@ -1,13 +1,3 @@
-// Gateway pairing mode — first-connect authentication.
-//
-// On startup the gateway generates a one-time pairing code printed to the
-// terminal. The first client must present this code via `X-Pairing-Code`
-// header on a `POST /pair` request. The server responds with a bearer token
-// that must be sent on all subsequent requests via `Authorization: Bearer <token>`.
-//
-// Already-paired tokens are persisted in config so restarts don't require
-// re-pairing.
-
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -33,11 +23,15 @@ struct FailedAttemptState {
     last_attempt: Instant,
 }
 
-/// Manages pairing state for the gateway.
-///
-/// Bearer tokens are stored as SHA-256 hashes to prevent plaintext exposure
-/// in config files. When a new token is generated, the plaintext is returned
-/// to the client once, and only the hash is retained.
+/// Why a `generate_pairing_code_if_vacant` call failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratePairingCodeError {
+    /// A pairing code is already pending; redeem or wait before issuing a new one.
+    Pending,
+    /// Pairing is disabled on this gateway.
+    PairingDisabled,
+}
+
 // TODO: I've just made this work with parking_lot but it should use either flume or tokio's async mutexes
 #[derive(Debug, Clone)]
 pub struct PairingGuard {
@@ -52,16 +46,6 @@ pub struct PairingGuard {
 }
 
 impl PairingGuard {
-    /// Create a new pairing guard.
-    ///
-    /// If `require_pairing` is true and no tokens exist yet, a fresh
-    /// pairing code is generated and printed to the terminal. Once
-    /// paired, no code is generated on restart — operators can use
-    /// `generate_new_pairing_code()` or the CLI to create one on demand.
-    ///
-    /// Existing tokens are accepted in both forms:
-    /// - Plaintext (`zc_...`): hashed on load for backward compatibility
-    /// - Already hashed (64-char hex): stored as-is
     pub fn new(require_pairing: bool, existing_tokens: &[String]) -> Self {
         let tokens: HashSet<String> = existing_tokens
             .iter()
@@ -219,10 +203,28 @@ impl PairingGuard {
         tokens.iter().cloned().collect()
     }
 
-    /// Generate a new pairing code, even if already paired.
-    ///
-    /// This allows adding additional clients without restarting the gateway.
-    /// The new code can be used exactly once to pair a new client.
+    pub fn revoke_token(&self, token: &str) -> bool {
+        let hashed = hash_token(token);
+        let mut tokens = self.paired_tokens.lock();
+        tokens.remove(&hashed)
+    }
+
+    /// Revoke a paired token by its SHA-256 hash. Returns true if removed.
+    pub fn revoke_token_hash(&self, token_hash: &str) -> bool {
+        let mut tokens = self.paired_tokens.lock();
+        tokens.remove(token_hash)
+    }
+
+    pub fn revoke_all_tokens(&self) -> usize {
+        let mut tokens = self.paired_tokens.lock();
+        let count = tokens.len();
+        tokens.clear();
+        count
+    }
+
+    /// Generate a new pairing code that pairs an additional client.
+    /// Does not revoke existing tokens. To rotate a compromised token,
+    /// pair with `revoke_token`/`revoke_token_hash` + a config persist pass.
     pub fn generate_new_pairing_code(&self) -> Option<String> {
         if !self.require_pairing {
             return None;
@@ -230,6 +232,19 @@ impl PairingGuard {
         let new_code = generate_code();
         *self.pairing_code.lock() = Some(new_code.clone());
         Some(new_code)
+    }
+
+    pub fn generate_pairing_code_if_vacant(&self) -> Result<String, GeneratePairingCodeError> {
+        if !self.require_pairing {
+            return Err(GeneratePairingCodeError::PairingDisabled);
+        }
+        let mut slot = self.pairing_code.lock();
+        if slot.is_some() {
+            return Err(GeneratePairingCodeError::Pending);
+        }
+        let new_code = generate_code();
+        *slot = Some(new_code.clone());
+        Ok(new_code)
     }
 
     /// Get the token hash for a given plaintext token (for device registry lookup).
@@ -267,14 +282,6 @@ fn prune_failed_attempts(map: &mut HashMap<String, FailedAttemptState>, now: Ins
 
 /// Generate a 6-digit numeric pairing code using cryptographically secure randomness.
 fn generate_code() -> String {
-    // UUID v4 uses getrandom (backed by /dev/urandom on Linux, BCryptGenRandom
-    // on Windows) — a CSPRNG. We extract 4 bytes from it for a uniform random
-    // number in [0, 1_000_000).
-    //
-    // Rejection sampling eliminates modulo bias: values above the largest
-    // multiple of 1_000_000 that fits in u32 are discarded and re-drawn.
-    // The rejection probability is ~0.02%, so this loop almost always exits
-    // on the first iteration.
     const UPPER_BOUND: u32 = 1_000_000;
     const REJECT_THRESHOLD: u32 = (u32::MAX / UPPER_BOUND) * UPPER_BOUND;
 
@@ -289,12 +296,6 @@ fn generate_code() -> String {
     }
 }
 
-/// Generate a cryptographically-adequate bearer token with 256-bit entropy.
-///
-/// Uses `rand::rng()` which is backed by the OS CSPRNG
-/// (/dev/urandom on Linux, BCryptGenRandom on Windows, SecRandomCopyBytes
-/// on macOS). The 32 random bytes (256 bits) are hex-encoded for a
-/// 64-character token, providing 256 bits of entropy.
 fn generate_token() -> String {
     let bytes: [u8; 32] = rand::random();
     format!("zc_{}", hex::encode(bytes))
@@ -311,22 +312,6 @@ fn is_token_hash(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Constant-time string comparison to prevent timing attacks.
-///
-/// This function is critical to the security of the pairing mechanism:
-/// when verifying the one-time pairing code, timing side-channels could
-/// allow an attacker to deduce the correct code character-by-character.
-///
-/// Implementation details that ensure constant-time execution:
-/// 1. Does not short-circuit on length mismatch — always iterates over
-///    the longer input to avoid leaking length information via timing.
-/// 2. Uses bitwise AND (&) instead of logical AND (&&) to ensure both
-///    comparisons always execute, preventing timing variations that could
-///    reveal whether the length check or byte comparison failed first.
-///
-/// SECURITY NOTE: The use of `&` instead of `&&` is intentional and
-/// required for constant-time behavior. Do not change to `&&` or clippy
-/// suggestions that would reintroduce short-circuit evaluation.
 #[allow(clippy::needless_bitwise_bool)]
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
@@ -749,5 +734,103 @@ mod tests {
             result.is_ok(),
             "Legitimate client should not be locked out by attacker"
         );
+    }
+
+    // ── Token revocation ─────────────────────────────────────
+
+    #[test]
+    async fn revoked_token_no_longer_authenticates() {
+        let guard = PairingGuard::new(true, &[]);
+        let code = guard.pairing_code().unwrap().to_string();
+        let token = guard.try_pair(&code, "c").await.unwrap().unwrap();
+        assert!(guard.is_authenticated(&token));
+
+        assert!(guard.revoke_token(&token));
+        assert!(!guard.is_authenticated(&token));
+        assert!(!guard.is_paired());
+    }
+
+    #[test]
+    async fn revoked_token_is_dropped_from_persistence_view() {
+        let guard = PairingGuard::new(true, &[]);
+        let code = guard.pairing_code().unwrap().to_string();
+        let token = guard.try_pair(&code, "c").await.unwrap().unwrap();
+        let expected_hash = hash_token(&token);
+        assert!(guard.tokens().contains(&expected_hash));
+
+        assert!(guard.revoke_token(&token));
+        assert!(!guard.tokens().contains(&expected_hash));
+    }
+
+    #[test]
+    async fn revoke_token_hash_matches_revoke_token() {
+        let guard = PairingGuard::new(true, &["zc_a".into(), "zc_b".into()]);
+        let hash_a = hash_token("zc_a");
+        assert!(guard.revoke_token_hash(&hash_a));
+        assert!(!guard.is_authenticated("zc_a"));
+        assert!(guard.is_authenticated("zc_b"));
+    }
+
+    #[test]
+    async fn revoke_unknown_token_is_noop() {
+        let guard = PairingGuard::new(true, &["zc_a".into()]);
+        assert!(!guard.revoke_token("zc_never_paired"));
+        assert!(guard.is_authenticated("zc_a"));
+    }
+
+    #[test]
+    async fn revoke_is_scoped_to_target_token() {
+        let guard = PairingGuard::new(true, &["zc_keep".into(), "zc_drop".into()]);
+        assert!(guard.revoke_token("zc_drop"));
+        assert!(guard.is_authenticated("zc_keep"));
+        assert!(!guard.is_authenticated("zc_drop"));
+    }
+
+    #[test]
+    async fn revoke_all_tokens_invalidates_every_token() {
+        let guard = PairingGuard::new(true, &["zc_a".into(), "zc_b".into(), "zc_c".into()]);
+        assert_eq!(guard.revoke_all_tokens(), 3);
+        assert!(!guard.is_authenticated("zc_a"));
+        assert!(!guard.is_authenticated("zc_b"));
+        assert!(!guard.is_authenticated("zc_c"));
+        assert!(!guard.is_paired());
+        assert!(guard.tokens().is_empty());
+    }
+
+    #[test]
+    async fn revoke_all_tokens_on_empty_set_returns_zero() {
+        let guard = PairingGuard::new(true, &[]);
+        assert_eq!(guard.revoke_all_tokens(), 0);
+    }
+
+    // ── Atomic pairing-code generation ───────────────────────
+
+    #[test]
+    async fn generate_pairing_code_if_vacant_succeeds_when_slot_empty() {
+        let guard = PairingGuard::new(true, &["zc_existing".into()]);
+        // `new()` does not issue a code once paired; slot is empty here.
+        assert!(guard.pairing_code().is_none());
+        let code = guard.generate_pairing_code_if_vacant().unwrap();
+        assert_eq!(guard.pairing_code().as_deref(), Some(code.as_str()));
+    }
+
+    #[test]
+    async fn generate_pairing_code_if_vacant_refuses_when_slot_occupied() {
+        let guard = PairingGuard::new(true, &[]);
+        let pre_existing = guard.pairing_code().expect("startup code");
+        let err = guard.generate_pairing_code_if_vacant().unwrap_err();
+        assert_eq!(err, GeneratePairingCodeError::Pending);
+        assert_eq!(
+            guard.pairing_code().as_deref(),
+            Some(pre_existing.as_str()),
+            "occupied slot must be preserved"
+        );
+    }
+
+    #[test]
+    async fn generate_pairing_code_if_vacant_refuses_when_pairing_disabled() {
+        let guard = PairingGuard::new(false, &[]);
+        let err = guard.generate_pairing_code_if_vacant().unwrap_err();
+        assert_eq!(err, GeneratePairingCodeError::PairingDisabled);
     }
 }

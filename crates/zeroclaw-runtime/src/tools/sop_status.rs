@@ -82,10 +82,17 @@ impl Tool for SopStatusTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let engine = self
-            .engine
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Engine lock poisoned: {e}"))?;
+        let engine = self.engine.lock().map_err(|e| {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "SOP engine lock poisoned"
+            );
+
+            anyhow::Error::msg(format!("Engine lock poisoned: {e}"))
+        })?;
 
         // Query specific run
         if let Some(run_id) = run_id {
@@ -116,13 +123,13 @@ impl Tool for SopStatusTool {
                     self.append_gate_status(&mut output, include_gate_status);
                     Ok(ToolResult {
                         success: true,
-                        output,
+                        output: output.into(),
                         error: None,
                     })
                 }
                 None => Ok(ToolResult {
                     success: true,
-                    output: format!("No run found with ID '{run_id}'."),
+                    output: format!("No run found with ID '{run_id}'.").into(),
                     error: None,
                 }),
             };
@@ -191,7 +198,7 @@ impl Tool for SopStatusTool {
 
         Ok(ToolResult {
             success: true,
-            output,
+            output: output.into(),
             error: None,
         })
     }
@@ -257,11 +264,15 @@ mod tests {
                 requires_confirmation: false,
                 kind: SopStepKind::default(),
                 schema: None,
+                ..SopStep::default()
             }],
             cooldown_secs: 0,
             max_concurrent: 2,
             location: None,
             deterministic: false,
+            admission_policy: crate::sop::types::SopAdmissionPolicy::Parallel,
+            max_pending_approvals: 0,
+            agent: None,
         }
     }
 
@@ -367,20 +378,25 @@ mod tests {
             run_id: "r1".into(),
             sop_name: "s1".into(),
             trigger_event: manual_event(),
+            frame_marker_id: "marker-r1".into(),
             status: SopRunStatus::Completed,
             current_step: 1,
             total_steps: 1,
             started_at: "2026-02-19T12:00:00Z".into(),
             completed_at: Some("2026-02-19T12:05:00Z".into()),
             step_results: vec![SopStepResult {
+                effective_agent: None,
                 step_number: 1,
                 status: SopStepStatus::Completed,
                 output: "done".into(),
                 started_at: "2026-02-19T12:00:00Z".into(),
                 completed_at: Some("2026-02-19T12:01:00Z".into()),
+                tool_calls: Vec::new(),
             }],
             waiting_since: None,
             llm_calls_saved: 0,
+            revision: 0,
+            revision_base: 0,
         };
         collector.record_run_complete(&run);
 
@@ -403,20 +419,25 @@ mod tests {
             run_id: "r1".into(),
             sop_name: "s1".into(),
             trigger_event: manual_event(),
+            frame_marker_id: "marker-r1".into(),
             status: SopRunStatus::Failed,
             current_step: 1,
             total_steps: 2,
             started_at: "2026-02-19T12:00:00Z".into(),
             completed_at: Some("2026-02-19T12:05:00Z".into()),
             step_results: vec![SopStepResult {
+                effective_agent: None,
                 step_number: 1,
                 status: SopStepStatus::Failed,
                 output: "fail".into(),
                 started_at: "2026-02-19T12:00:00Z".into(),
                 completed_at: Some("2026-02-19T12:01:00Z".into()),
+                tool_calls: Vec::new(),
             }],
             waiting_since: None,
             llm_calls_saved: 0,
+            revision: 0,
+            revision_base: 0,
         };
         collector.record_run_complete(&run);
 
