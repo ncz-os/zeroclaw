@@ -33,8 +33,6 @@ pub mod vision_override;
 
 pub use dispatch::{ProviderDispatch, ProviderDispatchRef};
 
-mod request_payload;
-
 #[allow(unused_imports)]
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider,

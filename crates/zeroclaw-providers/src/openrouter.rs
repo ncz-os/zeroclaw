@@ -1,6 +1,5 @@
 use crate::compatible::sse_bytes_to_events;
 use crate::multimodal;
-use crate::request_payload::non_empty_string_field;
 use crate::stream_guard::AbortOnDrop;
 use crate::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,

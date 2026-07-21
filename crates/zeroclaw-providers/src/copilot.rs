@@ -1,6 +1,5 @@
 //! GitHub Copilot model_provider with OAuth device-flow authentication.
 
-use crate::request_payload::non_empty_string_field;
 use crate::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
     ModelProvider, TokenUsage, ToolCall as ProviderToolCall,
