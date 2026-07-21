@@ -1,10 +1,4 @@
 //! Drive Tool - Motor control for omni-directional movement
-//!
-//! Supports multiple backends:
-//! - ROS2: Publishes geometry_msgs/Twist to cmd_vel topic
-//! - GPIO: Direct PWM control via rppal
-//! - Serial: Arduino/motor controller via serial commands
-//! - Mock: Logs commands for testing
 
 use crate::config::RobotConfig;
 use crate::traits::{Tool, ToolResult};
@@ -26,8 +20,6 @@ trait DriveBackend: Send + Sync {
         duration_ms: u64,
     ) -> Result<()>;
     async fn stop(&self) -> Result<()>;
-    #[allow(dead_code)]
-    async fn get_odometry(&self) -> Result<(f64, f64, f64)>; // x, y, theta - reserved for future odometry integration
 }
 
 /// Mock backend for testing
@@ -42,24 +34,25 @@ impl DriveBackend for MockDrive {
         angular_z: f64,
         duration_ms: u64,
     ) -> Result<()> {
-        tracing::info!(
-            "MOCK DRIVE: linear=({:.2}, {:.2}), angular={:.2}, duration={}ms",
-            linear_x,
-            linear_y,
-            angular_z,
-            duration_ms
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            &format!(
+                "MOCK DRIVE: linear=({:.2}, {:.2}), angular={:.2}, duration={}ms",
+                linear_x, linear_y, angular_z, duration_ms
+            )
         );
         tokio::time::sleep(Duration::from_millis(duration_ms.min(100))).await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        tracing::info!("MOCK DRIVE: STOP");
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            "MOCK DRIVE: STOP"
+        );
         Ok(())
-    }
-
-    async fn get_odometry(&self) -> Result<(f64, f64, f64)> {
-        Ok((0.0, 0.0, 0.0))
     }
 }
 
@@ -125,11 +118,6 @@ impl DriveBackend for Ros2Drive {
             .await?;
         Ok(())
     }
-
-    async fn get_odometry(&self) -> Result<(f64, f64, f64)> {
-        // Would subscribe to /odom topic in production
-        Ok((0.0, 0.0, 0.0))
-    }
 }
 
 /// Serial backend - sends commands to Arduino/motor controller
@@ -170,10 +158,6 @@ impl DriveBackend for SerialDrive {
 
     async fn stop(&self) -> Result<()> {
         self.move_robot(0.0, 0.0, 0.0, 0).await
-    }
-
-    async fn get_odometry(&self) -> Result<(f64, f64, f64)> {
-        Ok((0.0, 0.0, 0.0))
     }
 }
 
@@ -253,7 +237,7 @@ impl Tool for DriveTool {
     async fn execute(&self, args: Value) -> Result<ToolResult> {
         let action = args["action"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+            .ok_or_else(|| anyhow::Error::msg("Missing 'action' parameter"))?;
 
         // Safety: check max drive duration
         {

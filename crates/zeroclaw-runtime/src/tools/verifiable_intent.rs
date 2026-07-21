@@ -13,7 +13,7 @@ use crate::verifiable_intent::verification::{
     ConstraintCheckResult, StrictnessMode, check_constraints, verify_sd_hash_binding,
     verify_timestamps,
 };
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 
 /// Tool for verifying Verifiable Intent credential chains and evaluating
 /// constraints against fulfillment data.
@@ -88,7 +88,7 @@ impl Tool for VerifiableIntentTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(error),
             });
         }
@@ -101,7 +101,7 @@ impl Tool for VerifiableIntentTool {
             "verify_timestamps" => execute_verify_timestamps(&args),
             _ => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!("unknown operation: {operation}")),
             }),
         }
@@ -112,11 +112,31 @@ fn execute_verify_binding(args: &serde_json::Value) -> anyhow::Result<ToolResult
     let sd_hash = args
         .get("sd_hash")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("missing 'sd_hash' parameter"))?;
+        .ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"param": "sd_hash"})),
+                "tool argument validation failed"
+            );
+
+            anyhow::Error::msg("missing 'sd_hash' parameter")
+        })?;
     let serialized_parent = args
         .get("serialized_parent")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("missing 'serialized_parent' parameter"))?;
+        .ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"param": "serialized_parent"})),
+                "tool argument validation failed"
+            );
+
+            anyhow::Error::msg("missing 'serialized_parent' parameter")
+        })?;
 
     match verify_sd_hash_binding(sd_hash, serialized_parent) {
         Ok(()) => Ok(ToolResult {
@@ -132,12 +152,28 @@ fn execute_evaluate_constraints(
     args: &serde_json::Value,
     strictness: StrictnessMode,
 ) -> anyhow::Result<ToolResult> {
-    let constraints_value = args
-        .get("constraints")
-        .ok_or_else(|| anyhow::anyhow!("missing 'constraints' parameter"))?;
-    let fulfillment_value = args
-        .get("fulfillment")
-        .ok_or_else(|| anyhow::anyhow!("missing 'fulfillment' parameter"))?;
+    let constraints_value = args.get("constraints").ok_or_else(|| {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"param": "constraints"})),
+            "tool argument validation failed"
+        );
+
+        anyhow::Error::msg("missing 'constraints' parameter")
+    })?;
+    let fulfillment_value = args.get("fulfillment").ok_or_else(|| {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"param": "fulfillment"})),
+            "tool argument validation failed"
+        );
+
+        anyhow::Error::msg("missing 'fulfillment' parameter")
+    })?;
 
     let constraints: Vec<Constraint> = serde_json::from_value(constraints_value.clone())?;
     let fulfillment: Fulfillment = serde_json::from_value(fulfillment_value.clone())?;
@@ -152,7 +188,8 @@ fn execute_evaluate_constraints(
         output: serde_json::to_string_pretty(&json!({
             "all_satisfied": all_satisfied,
             "results": summary,
-        }))?,
+        }))?
+        .into(),
         error: if all_satisfied {
             None
         } else {
@@ -162,14 +199,28 @@ fn execute_evaluate_constraints(
 }
 
 fn execute_verify_timestamps(args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-    let iat = args
-        .get("iat")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow::anyhow!("missing 'iat' parameter"))?;
-    let exp = args
-        .get("exp")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| anyhow::anyhow!("missing 'exp' parameter"))?;
+    let iat = args.get("iat").and_then(|v| v.as_i64()).ok_or_else(|| {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"param": "iat"})),
+            "tool argument validation failed"
+        );
+
+        anyhow::Error::msg("missing 'iat' parameter")
+    })?;
+    let exp = args.get("exp").and_then(|v| v.as_i64()).ok_or_else(|| {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"param": "exp"})),
+            "tool argument validation failed"
+        );
+
+        anyhow::Error::msg("missing 'exp' parameter")
+    })?;
 
     match verify_timestamps(iat, exp) {
         Ok(()) => Ok(ToolResult {
@@ -184,7 +235,7 @@ fn execute_verify_timestamps(args: &serde_json::Value) -> anyhow::Result<ToolRes
 fn vi_error_result(e: &ViError) -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: ToolOutput::default(),
         error: Some(format!("{}", e)),
     }
 }

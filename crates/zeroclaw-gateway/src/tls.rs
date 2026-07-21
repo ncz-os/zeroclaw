@@ -1,8 +1,4 @@
 //! TLS and mutual TLS (mTLS) support for the gateway server.
-//!
-//! Builds a [`rustls::ServerConfig`] from the gateway TLS configuration,
-//! optionally requiring client certificates verified against a trusted CA
-//! with optional certificate pinning (SHA-256 fingerprint matching).
 
 use anyhow::{Context, Result};
 use rustls::RootCertStore;
@@ -185,7 +181,16 @@ fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>> {
     let mut reader = std::io::BufReader::new(file);
     let key = rustls_pemfile::private_key(&mut reader)
         .with_context(|| format!("failed to parse private key from {path}"))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {path}"))?;
+        .ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"path": path})),
+                "TLS private key file contains no key"
+            );
+            anyhow::Error::msg(format!("no private key found in {path}"))
+        })?;
     Ok(key)
 }
 
@@ -198,8 +203,6 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    /// Generate a self-signed CA cert + key pair.
-    /// Returns (cert_pem, key_pem, key_pair) so the key can be reused for signing.
     fn test_ca() -> (String, String, rcgen::KeyPair) {
         let ca_key = rcgen::KeyPair::generate().unwrap();
         let mut ca_params = rcgen::CertificateParams::new(vec!["Test CA".into()]).unwrap();
@@ -208,7 +211,6 @@ mod tests {
         (ca_cert.pem(), ca_key.serialize_pem(), ca_key)
     }
 
-    /// Generate a server certificate signed by the given CA.
     fn test_server_cert(ca_cert_pem: &str, ca_key: &rcgen::KeyPair) -> (String, String) {
         // Re-parse the CA cert for signing.
         let ca_key_clone = rcgen::KeyPair::from_pem(&ca_key.serialize_pem()).unwrap();

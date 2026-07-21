@@ -24,7 +24,7 @@ impl Default for LinkEnricherConfig {
     }
 }
 
-/// URL regex: matches http:// and https:// URLs, stopping at whitespace, angle
+/// URL regex: matches `http://` and `https://` URLs, stopping at whitespace, angle
 /// brackets, or double-quotes.
 static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"https?://[^\s<>"']+"#).expect("URL regex must compile"));
@@ -201,11 +201,6 @@ async fn fetch_link_summary(url: &str, timeout_secs: u64) -> Option<LinkSummary>
     Some(LinkSummary { title, snippet })
 }
 
-/// Enrich a message by prepending link summaries for any URLs found in the text.
-///
-/// This is the main entry point called from the channel message processing pipeline.
-/// If the enricher is disabled or no URLs are found, the original message is returned
-/// unchanged.
 pub async fn enrich_message(content: &str, config: &LinkEnricherConfig) -> String {
     if !config.enabled || config.max_links == 0 {
         return content.to_string();
@@ -233,7 +228,12 @@ pub async fn enrich_message(content: &str, config: &LinkEnricherConfig) -> Strin
                 enrichments.push(format!("[Link: {} — {}]", summary.title, summary.snippet));
             }
             None => {
-                tracing::debug!(url, "Link enricher: failed to fetch or extract summary");
+                ::zeroclaw_log::record!(
+                    DEBUG,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_attrs(::serde_json::json!({"url": url})),
+                    "Link enricher: failed to fetch or extract summary"
+                );
             }
         }
     }

@@ -3,7 +3,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::policy::ToolOperation;
 use zeroclaw_config::schema::GeminiCliConfig;
@@ -13,14 +13,6 @@ const SAFE_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
 ];
 
-/// Delegates coding tasks to the Gemini CLI (`gemini -p`).
-///
-/// This creates a two-tier agent architecture: ZeroClaw orchestrates high-level
-/// tasks and delegates complex coding work to Gemini CLI, which has its own
-/// agent loop with file editing and shell tools.
-///
-/// Authentication uses the `gemini` binary's own session by default. No API key
-/// is needed unless `env_passthrough` includes `GOOGLE_API_KEY`.
 pub struct GeminiCliTool {
     security: Arc<SecurityPolicy>,
     config: GeminiCliConfig,
@@ -60,14 +52,8 @@ impl Tool for GeminiCliTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        // Rate limit check
-        if self.security.is_rate_limited() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
-            });
-        }
+        // Rate limiting is applied by the RateLimitedTool wrapper at
+        // registration time (see zeroclaw-runtime::tools::mod).
 
         // Enforce act policy
         if let Err(error) = self
@@ -76,16 +62,22 @@ impl Tool for GeminiCliTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(error),
             });
         }
 
         // Extract prompt (required)
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
+        let prompt = args.get("prompt").and_then(|v| v.as_str()).ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"param": "prompt"})),
+                "gemini_cli_tool: missing prompt parameter"
+            );
+            anyhow::Error::msg("Missing 'prompt' parameter")
+        })?;
 
         // Validate working directory — require both paths to exist (reject
         // non-existent paths instead of falling back to the raw value, which
@@ -93,13 +85,18 @@ impl Tool for GeminiCliTool {
         // specially-crafted path components).
         let work_dir = if let Some(wd) = args.get("working_directory").and_then(|v| v.as_str()) {
             let wd_path = std::path::PathBuf::from(wd);
+            let wd_path = if wd_path.is_relative() {
+                self.security.workspace_dir.join(&wd_path)
+            } else {
+                wd_path
+            };
             let workspace = &self.security.workspace_dir;
             let canonical_wd = match wd_path.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(format!(
                             "working_directory '{}' does not exist or is not accessible",
                             wd
@@ -112,7 +109,7 @@ impl Tool for GeminiCliTool {
                 Err(_) => {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(format!(
                             "workspace directory '{}' does not exist or is not accessible",
                             workspace.display()
@@ -123,7 +120,7 @@ impl Tool for GeminiCliTool {
             if !canonical_wd.starts_with(&canonical_ws) {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!(
                         "working_directory '{}' is outside the workspace '{}'",
                         wd,
@@ -135,15 +132,6 @@ impl Tool for GeminiCliTool {
         } else {
             self.security.workspace_dir.clone()
         };
-
-        // Record action budget
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: action budget exhausted".into()),
-            });
-        }
 
         // Build CLI command
         let gemini_bin = if cfg!(target_os = "windows") {
@@ -196,7 +184,7 @@ impl Tool for GeminiCliTool {
 
                 Ok(ToolResult {
                     success: output.status.success(),
-                    output: stdout,
+                    output: stdout.into(),
                     error: if stderr.is_empty() {
                         None
                     } else {
@@ -216,7 +204,7 @@ impl Tool for GeminiCliTool {
                 };
                 Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(msg),
                 })
             }
@@ -225,7 +213,7 @@ impl Tool for GeminiCliTool {
                 // when the future is dropped.
                 Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!(
                         "Gemini CLI timed out after {}s and was killed",
                         self.config.timeout_secs

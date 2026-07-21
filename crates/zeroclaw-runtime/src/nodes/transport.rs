@@ -1,8 +1,4 @@
 //! Corporate-friendly secure node transport using standard HTTPS + HMAC-SHA256 authentication.
-//!
-//! All inter-node traffic uses plain HTTPS on port 443 — no exotic protocols,
-//! no custom binary framing, no UDP tunneling.  This makes the transport
-//! compatible with corporate proxies, firewalls, and IT audit expectations.
 
 use anyhow::{Result, bail};
 use chrono::Utc;
@@ -12,7 +8,6 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Signs a request payload with HMAC-SHA256.
-///
 /// Uses `timestamp` + `nonce` alongside the payload to prevent replay attacks.
 pub fn sign_request(
     shared_secret: &str,
@@ -20,8 +15,16 @@ pub fn sign_request(
     timestamp: i64,
     nonce: &str,
 ) -> Result<String> {
-    let mut mac = HmacSha256::new_from_slice(shared_secret.as_bytes())
-        .map_err(|e| anyhow::anyhow!("HMAC key error: {e}"))?;
+    let mut mac = HmacSha256::new_from_slice(shared_secret.as_bytes()).map_err(|e| {
+        ::zeroclaw_log::record!(
+            ERROR,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+            "node transport: HMAC-SHA256 init rejected shared_secret"
+        );
+        anyhow::Error::msg(format!("HMAC key error: {e}"))
+    })?;
     mac.update(&timestamp.to_le_bytes());
     mac.update(nonce.as_bytes());
     mac.update(payload);
@@ -59,14 +62,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ── Node transport client ───────────────────────────────────────
 
-/// Sends authenticated HTTPS requests to peer nodes.
-///
-/// Every outgoing request carries three custom headers:
-/// - `X-ZeroClaw-Timestamp` — unix epoch seconds
-/// - `X-ZeroClaw-Nonce` — random UUID v4
-/// - `X-ZeroClaw-Signature` — HMAC-SHA256 hex digest
-///
-/// Incoming requests are verified with the same scheme via [`Self::verify_incoming`].
 pub struct NodeTransport {
     http: reqwest::Client,
     shared_secret: String,
@@ -128,9 +123,16 @@ impl NodeTransport {
         nonce_header: &str,
         signature_header: &str,
     ) -> Result<bool> {
-        let timestamp: i64 = timestamp_header
-            .parse()
-            .map_err(|_| anyhow::anyhow!("Invalid timestamp header"))?;
+        let timestamp: i64 = timestamp_header.parse().map_err(|_| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"header": timestamp_header})),
+                "node transport: invalid timestamp header"
+            );
+            anyhow::Error::msg("Invalid timestamp header")
+        })?;
         verify_request(
             &self.shared_secret,
             payload,

@@ -1,5 +1,4 @@
 //! Listen Tool - Speech-to-text via Whisper.cpp
-//!
 //! Records audio from microphone and transcribes using local Whisper model.
 //! Designed for offline operation on Raspberry Pi.
 
@@ -147,7 +146,11 @@ impl Tool for ListenTool {
         let duration = args["duration"].as_u64().unwrap_or(5).clamp(1, 30);
 
         // Record audio
-        tracing::info!("Recording audio for {} seconds...", duration);
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            &format!("Recording audio for {} seconds...", duration)
+        );
         let audio_path = match self.record_audio(duration).await {
             Ok(path) => path,
             Err(e) => {
@@ -160,7 +163,11 @@ impl Tool for ListenTool {
         };
 
         // Transcribe
-        tracing::info!("Transcribing audio...");
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            "Transcribing audio..."
+        );
         match self.transcribe(&audio_path).await {
             Ok(transcript) => {
                 // Clean up audio file

@@ -1,11 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Try to deserialize a `serde_json::Value` as `T`.  If the value is a JSON
-/// string that looks like an object (i.e. the LLM double-serialized it), parse
-/// the inner string first and then deserialize the resulting object.  This
-/// provides backward-compatible handling for both `Value::Object` and
-/// `Value::String` representations.
 pub fn deserialize_maybe_stringified<T: serde::de::DeserializeOwned>(
     v: &serde_json::Value,
 ) -> Result<T, serde_json::Error> {
@@ -108,6 +103,8 @@ pub struct DeliveryConfig {
     pub channel: Option<String>,
     #[serde(default)]
     pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     #[serde(default = "default_true")]
     pub best_effort: bool,
 }
@@ -118,6 +115,7 @@ impl Default for DeliveryConfig {
             mode: "none".to_string(),
             channel: None,
             to: None,
+            thread_id: None,
             best_effort: true,
         }
     }
@@ -142,12 +140,15 @@ pub struct CronJob {
     pub job_type: JobType,
     pub session_target: SessionTarget,
     pub model: Option<String>,
+    /// Agent alias this job runs under. Empty when the row was written
+    /// before the column existed and no agent has claimed it; the
+    /// scheduler skips such rows with a warning rather than coercing
+    /// them to a magic alias.
+    #[serde(default)]
+    pub agent_alias: String,
     pub enabled: bool,
     pub delivery: DeliveryConfig,
     pub delete_after_run: bool,
-    /// Optional allowlist of tool names this cron job may use.
-    /// When `Some(list)`, only tools whose name is in the list are available.
-    /// When `None`, all tools are available (backward compatible default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
     /// Whether to recall and inject memory context before this agent job runs.
@@ -189,6 +190,20 @@ pub struct CronJobPatch {
     pub delete_after_run: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
     pub uses_memory: Option<bool>,
+}
+
+impl ::zeroclaw_api::attribution::Attributable for CronJob {
+    fn role(&self) -> ::zeroclaw_api::attribution::Role {
+        let kind = match self.schedule {
+            Schedule::Cron { .. } => ::zeroclaw_api::attribution::CronKind::Cron,
+            Schedule::At { .. } => ::zeroclaw_api::attribution::CronKind::At,
+            Schedule::Every { .. } => ::zeroclaw_api::attribution::CronKind::Interval,
+        };
+        ::zeroclaw_api::attribution::Role::Cron(kind)
+    }
+    fn alias(&self) -> &str {
+        &self.id
+    }
 }
 
 #[cfg(test)]

@@ -5,18 +5,28 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::sync::Arc;
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::Config;
 
 /// Tool that lets the agent manage recurring and one-shot scheduled tasks.
 pub struct ScheduleTool {
     security: Arc<SecurityPolicy>,
     config: Config,
+    /// Owning agent — risk profile gate for shell command validation.
+    agent_alias: String,
 }
 
 impl ScheduleTool {
-    pub fn new(security: Arc<SecurityPolicy>, config: Config) -> Self {
-        Self { security, config }
+    pub fn new(
+        security: Arc<SecurityPolicy>,
+        config: Config,
+        agent_alias: impl Into<String>,
+    ) -> Self {
+        Self {
+            security,
+            config,
+            agent_alias: agent_alias.into(),
+        }
     }
 }
 
@@ -76,7 +86,17 @@ impl Tool for ScheduleTool {
         let action = args
             .get("action")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
+            .ok_or_else(|| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"param": "action"})),
+                    "tool argument validation failed"
+                );
+
+                anyhow::Error::msg("Missing 'action' parameter")
+            })?;
 
         match action {
             "list" => self.handle_list(),
@@ -84,7 +104,20 @@ impl Tool for ScheduleTool {
                 let id = args
                     .get("id")
                     .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for get action"))?;
+                    .ok_or_else(|| {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Reject
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"param": "id"})),
+                            "tool argument validation failed"
+                        );
+
+                        anyhow::Error::msg("Missing 'id' parameter for get action")
+                    })?;
                 self.handle_get(id)
             }
             "create" | "add" | "once" => {
@@ -101,7 +134,20 @@ impl Tool for ScheduleTool {
                 let id = args
                     .get("id")
                     .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for cancel action"))?;
+                    .ok_or_else(|| {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Reject
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"param": "id"})),
+                            "tool argument validation failed"
+                        );
+
+                        anyhow::Error::msg("Missing 'id' parameter for cancel action")
+                    })?;
                 Ok(self.handle_cancel(id))
             }
             "pause" => {
@@ -111,7 +157,20 @@ impl Tool for ScheduleTool {
                 let id = args
                     .get("id")
                     .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for pause action"))?;
+                    .ok_or_else(|| {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Reject
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"param": "id"})),
+                            "tool argument validation failed"
+                        );
+
+                        anyhow::Error::msg("Missing 'id' parameter for pause action")
+                    })?;
                 Ok(self.handle_pause_resume(id, true))
             }
             "resume" => {
@@ -121,12 +180,25 @@ impl Tool for ScheduleTool {
                 let id = args
                     .get("id")
                     .and_then(|value| value.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'id' parameter for resume action"))?;
+                    .ok_or_else(|| {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Reject
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"param": "id"})),
+                            "tool argument validation failed"
+                        );
+
+                        anyhow::Error::msg("Missing 'id' parameter for resume action")
+                    })?;
                 Ok(self.handle_pause_resume(id, false))
             }
             other => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!(
                     "Unknown action '{other}'. Use create/add/once/list/get/cancel/remove/pause/resume."
                 )),
@@ -137,12 +209,12 @@ impl Tool for ScheduleTool {
 
 impl ScheduleTool {
     fn enforce_mutation_allowed(&self, action: &str) -> Option<ToolResult> {
-        if !self.config.cron.enabled {
+        if !self.config.scheduler.enabled {
             return Some(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!(
-                    "cron is disabled by config (cron.enabled=false); cannot perform '{action}'"
+                    "cron is disabled by config (scheduler.enabled=false); cannot perform '{action}'"
                 )),
             });
         }
@@ -150,7 +222,7 @@ impl ScheduleTool {
         if !self.security.can_act() {
             return Some(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!(
                     "Security policy: read-only mode, cannot perform '{action}'"
                 )),
@@ -160,7 +232,7 @@ impl ScheduleTool {
         if !self.security.record_action() {
             return Some(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some("Rate limit exceeded: action budget exhausted".to_string()),
             });
         }
@@ -173,7 +245,7 @@ impl ScheduleTool {
         if jobs.is_empty() {
             return Ok(ToolResult {
                 success: true,
-                output: "No scheduled jobs.".to_string(),
+                output: "No scheduled jobs.".to_string().into(),
                 error: None,
             });
         }
@@ -206,7 +278,7 @@ impl ScheduleTool {
 
         Ok(ToolResult {
             success: true,
-            output: format!("Scheduled jobs ({}):\n{}", lines.len(), lines.join("\n")),
+            output: format!("Scheduled jobs ({}):\n{}", lines.len(), lines.join("\n")).into(),
             error: None,
         })
     }
@@ -226,13 +298,13 @@ impl ScheduleTool {
                 });
                 Ok(ToolResult {
                     success: true,
-                    output: serde_json::to_string_pretty(&detail)?,
+                    output: serde_json::to_string_pretty(&detail)?.into(),
                     error: None,
                 })
             }
             Err(_) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!("Job '{id}' not found")),
             }),
         }
@@ -248,7 +320,17 @@ impl ScheduleTool {
             .get("command")
             .and_then(|value| value.as_str())
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing or empty 'command' parameter"))?;
+            .ok_or_else(|| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"param": "command"})),
+                    "tool argument validation failed"
+                );
+
+                anyhow::Error::msg("Missing or empty 'command' parameter")
+            })?;
 
         let expression = args.get("expression").and_then(|value| value.as_str());
         let delay = args.get("delay").and_then(|value| value.as_str());
@@ -259,7 +341,7 @@ impl ScheduleTool {
                 if expression.is_none() || delay.is_some() || run_at.is_some() {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some("'add' requires 'expression' and forbids delay/run_at".into()),
                     });
                 }
@@ -268,14 +350,14 @@ impl ScheduleTool {
                 if expression.is_some() || (delay.is_none() && run_at.is_none()) {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some("'once' requires exactly one of 'delay' or 'run_at'".into()),
                     });
                 }
                 if delay.is_some() && run_at.is_some() {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some("'once' supports either delay or run_at, not both".into()),
                     });
                 }
@@ -288,7 +370,7 @@ impl ScheduleTool {
                 if count != 1 {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(
                             "Exactly one of 'expression', 'delay', or 'run_at' must be provided"
                                 .into(),
@@ -299,7 +381,7 @@ impl ScheduleTool {
         }
 
         // Enforce rate-limiting AFTER command/args validation so that invalid
-        // requests do not consume the action budget.  (Fixes #3699)
+        // requests do not consume the action budget.
         if let Some(blocked) = self.enforce_mutation_allowed(action) {
             return Ok(blocked);
         }
@@ -309,6 +391,7 @@ impl ScheduleTool {
         if let Some(value) = expression {
             let job = match cron::add_shell_job_with_approval(
                 &self.config,
+                &self.agent_alias,
                 None,
                 cron::Schedule::Cron {
                     expr: value.to_string(),
@@ -322,7 +405,7 @@ impl ScheduleTool {
                 Err(error) => {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(error.to_string()),
                     });
                 }
@@ -335,18 +418,25 @@ impl ScheduleTool {
                     job.expression,
                     job.next_run.to_rfc3339(),
                     job.command
-                ),
+                )
+                .into(),
                 error: None,
             });
         }
 
         if let Some(value) = delay {
-            let job = match cron::add_once_validated(&self.config, value, command, approved) {
+            let job = match cron::add_once_validated(
+                &self.config,
+                &self.agent_alias,
+                value,
+                command,
+                approved,
+            ) {
                 Ok(job) => job,
                 Err(error) => {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(error.to_string()),
                     });
                 }
@@ -358,23 +448,49 @@ impl ScheduleTool {
                     job.id,
                     job.next_run.to_rfc3339(),
                     job.command
-                ),
+                )
+                .into(),
                 error: None,
             });
         }
 
-        let run_at_raw = run_at.ok_or_else(|| anyhow::anyhow!("Missing scheduling parameters"))?;
+        let run_at_raw = run_at.ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                "schedule tool: missing scheduling parameters (run_at / delay_seconds)"
+            );
+            anyhow::Error::msg("Missing scheduling parameters")
+        })?;
         let run_at_parsed: DateTime<Utc> = DateTime::parse_from_rfc3339(run_at_raw)
-            .map_err(|error| anyhow::anyhow!("Invalid run_at timestamp: {error}"))?
+            .map_err(|error| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "run_at": run_at_raw,
+                            "error": format!("{}", error),
+                        })),
+                    "schedule tool: invalid run_at timestamp"
+                );
+                anyhow::Error::msg(format!("Invalid run_at timestamp: {error}"))
+            })?
             .with_timezone(&Utc);
 
-        let job = match cron::add_once_at_validated(&self.config, run_at_parsed, command, approved)
-        {
+        let job = match cron::add_once_at_validated(
+            &self.config,
+            &self.agent_alias,
+            run_at_parsed,
+            command,
+            approved,
+        ) {
             Ok(job) => job,
             Err(error) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(error.to_string()),
                 });
             }
@@ -386,7 +502,8 @@ impl ScheduleTool {
                 job.id,
                 job.next_run.to_rfc3339(),
                 job.command
-            ),
+            )
+            .into(),
             error: None,
         })
     }
@@ -395,12 +512,12 @@ impl ScheduleTool {
         match cron::remove_job(&self.config, id) {
             Ok(()) => ToolResult {
                 success: true,
-                output: format!("Cancelled job {id}"),
+                output: format!("Cancelled job {id}").into(),
                 error: None,
             },
             Err(error) => ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(error.to_string()),
             },
         }
@@ -417,15 +534,15 @@ impl ScheduleTool {
             Ok(_) => ToolResult {
                 success: true,
                 output: if pause {
-                    format!("Paused job {id}")
+                    format!("Paused job {id}").into()
                 } else {
-                    format!("Resumed job {id}")
+                    format!("Resumed job {id}").into()
                 },
                 error: None,
             },
             Err(error) => ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(error.to_string()),
             },
         }
@@ -440,25 +557,23 @@ mod tests {
 
     async fn test_setup() -> (TempDir, Config, Arc<SecurityPolicy>) {
         let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().join("workspace"),
-            config_path: tmp.path().join("config.toml"),
-            ..Config::default()
-        };
-        tokio::fs::create_dir_all(&config.workspace_dir)
-            .await
-            .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
+        // Seed test-agent so ScheduleTool's add_shell_job_with_approval
+        // (which validates against the agent's risk profile) succeeds.
+        let config = config_with_test_agent_profiles(
+            tmp.path().join("workspace"),
+            tmp.path().join("config.toml"),
+            zeroclaw_config::schema::RiskProfileConfig::default(),
+            zeroclaw_config::schema::RuntimeProfileConfig::default(),
+        );
+        tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
         (tmp, config, security)
     }
 
     #[tokio::test]
     async fn tool_name_and_schema() {
         let (_tmp, config, security) = test_setup().await;
-        let tool = ScheduleTool::new(security, config);
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
         assert_eq!(tool.name(), "schedule");
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["action"].is_object());
@@ -467,7 +582,7 @@ mod tests {
     #[tokio::test]
     async fn list_empty() {
         let (_tmp, config, security) = test_setup().await;
-        let tool = ScheduleTool::new(security, config);
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let result = tool.execute(json!({"action": "list"})).await.unwrap();
         assert!(result.success);
@@ -477,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn create_get_and_cancel_roundtrip() {
         let (_tmp, config, security) = test_setup().await;
-        let tool = ScheduleTool::new(security, config);
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let create = tool
             .execute(json!({
@@ -513,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn once_and_pause_resume_aliases_work() {
         let (_tmp, config, security) = test_setup().await;
-        let tool = ScheduleTool::new(security, config);
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let once = tool
             .execute(json!({
@@ -549,27 +664,65 @@ mod tests {
         assert!(resume.success);
     }
 
+    const TEST_AGENT: &str = "test-agent";
+
+    fn config_with_test_agent_profiles(
+        workspace: std::path::PathBuf,
+        config_path: std::path::PathBuf,
+        risk: zeroclaw_config::schema::RiskProfileConfig,
+        runtime: zeroclaw_config::schema::RuntimeProfileConfig,
+    ) -> Config {
+        let mut config = Config {
+            data_dir: workspace,
+            config_path,
+            ..Config::default()
+        };
+        config.risk_profiles.insert(TEST_AGENT.into(), risk);
+        config.runtime_profiles.insert(TEST_AGENT.into(), runtime);
+        seed_test_agent_provider_and_agent(&mut config);
+        config
+    }
+
+    fn seed_test_agent_provider_and_agent(config: &mut Config) {
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.to_string())
+            .or_default();
+        config
+            .runtime_profiles
+            .entry(TEST_AGENT.to_string())
+            .or_default();
+        config
+            .providers
+            .models
+            .ensure("openrouter", TEST_AGENT)
+            .expect("known family");
+        config.agents.entry(TEST_AGENT.to_string()).or_insert(
+            zeroclaw_config::schema::AliasedAgentConfig {
+                model_provider: format!("openrouter.{TEST_AGENT}").into(),
+                risk_profile: TEST_AGENT.into(),
+                runtime_profile: TEST_AGENT.into(),
+                ..Default::default()
+            },
+        );
+    }
+
     #[tokio::test]
     async fn readonly_blocks_mutating_actions() {
         let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().join("workspace"),
-            config_path: tmp.path().join("config.toml"),
-            autonomy: zeroclaw_config::schema::AutonomyConfig {
+        let config = config_with_test_agent_profiles(
+            tmp.path().join("workspace"),
+            tmp.path().join("config.toml"),
+            zeroclaw_config::schema::RiskProfileConfig {
                 level: AutonomyLevel::ReadOnly,
                 ..Default::default()
             },
-            ..Config::default()
-        };
-        tokio::fs::create_dir_all(&config.workspace_dir)
-            .await
-            .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
+            zeroclaw_config::schema::RuntimeProfileConfig::default(),
+        );
+        tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
 
-        let tool = ScheduleTool::new(security, config);
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let blocked = tool
             .execute(json!({
@@ -589,24 +742,21 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_blocks_create_action() {
         let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().join("workspace"),
-            config_path: tmp.path().join("config.toml"),
-            autonomy: zeroclaw_config::schema::AutonomyConfig {
+        let config = config_with_test_agent_profiles(
+            tmp.path().join("workspace"),
+            tmp.path().join("config.toml"),
+            zeroclaw_config::schema::RiskProfileConfig {
                 level: AutonomyLevel::Full,
+                ..Default::default()
+            },
+            zeroclaw_config::schema::RuntimeProfileConfig {
                 max_actions_per_hour: 0,
                 ..Default::default()
             },
-            ..Config::default()
-        };
-        tokio::fs::create_dir_all(&config.workspace_dir)
-            .await
-            .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
-        let tool = ScheduleTool::new(security, config);
+        );
+        tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let blocked = tool
             .execute(json!({
@@ -633,24 +783,21 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_blocks_cancel_and_keeps_job() {
         let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().join("workspace"),
-            config_path: tmp.path().join("config.toml"),
-            autonomy: zeroclaw_config::schema::AutonomyConfig {
+        let config = config_with_test_agent_profiles(
+            tmp.path().join("workspace"),
+            tmp.path().join("config.toml"),
+            zeroclaw_config::schema::RiskProfileConfig {
                 level: AutonomyLevel::Full,
+                ..Default::default()
+            },
+            zeroclaw_config::schema::RuntimeProfileConfig {
                 max_actions_per_hour: 1,
                 ..Default::default()
             },
-            ..Config::default()
-        };
-        tokio::fs::create_dir_all(&config.workspace_dir)
-            .await
-            .unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
-        let tool = ScheduleTool::new(security, config);
+        );
+        tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let create = tool
             .execute(json!({
@@ -687,7 +834,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_action_returns_failure() {
         let (_tmp, config, security) = test_setup().await;
-        let tool = ScheduleTool::new(security, config);
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let result = tool.execute(json!({"action": "explode"})).await.unwrap();
         assert!(!result.success);
@@ -698,17 +845,15 @@ mod tests {
     async fn mutating_actions_fail_when_cron_disabled() {
         let tmp = TempDir::new().unwrap();
         let mut config = Config {
-            workspace_dir: tmp.path().join("workspace"),
+            data_dir: tmp.path().join("data"),
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
         };
-        config.cron.enabled = false;
-        std::fs::create_dir_all(&config.workspace_dir).unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
-        let tool = ScheduleTool::new(security, config);
+        config.scheduler.enabled = false;
+        seed_test_agent_provider_and_agent(&mut config);
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let create = tool
             .execute(json!({
@@ -733,18 +878,24 @@ mod tests {
     async fn create_blocks_disallowed_command() {
         let tmp = TempDir::new().unwrap();
         let mut config = Config {
-            workspace_dir: tmp.path().join("workspace"),
+            data_dir: tmp.path().join("data"),
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
         };
-        config.autonomy.level = AutonomyLevel::Supervised;
-        config.autonomy.allowed_commands = vec!["echo".into()];
-        std::fs::create_dir_all(&config.workspace_dir).unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
-        let tool = ScheduleTool::new(security, config);
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .level = AutonomyLevel::Supervised;
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .allowed_commands = vec!["echo".into()];
+        seed_test_agent_provider_and_agent(&mut config);
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let result = tool
             .execute(json!({
@@ -769,18 +920,24 @@ mod tests {
     async fn medium_risk_create_requires_approval() {
         let tmp = TempDir::new().unwrap();
         let mut config = Config {
-            workspace_dir: tmp.path().join("workspace"),
+            data_dir: tmp.path().join("data"),
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
         };
-        config.autonomy.level = AutonomyLevel::Supervised;
-        config.autonomy.allowed_commands = vec!["touch".into()];
-        std::fs::create_dir_all(&config.workspace_dir).unwrap();
-        let security = Arc::new(SecurityPolicy::from_config(
-            &config.autonomy,
-            &config.workspace_dir,
-        ));
-        let tool = ScheduleTool::new(security, config);
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .level = AutonomyLevel::Supervised;
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .allowed_commands = vec!["touch".into()];
+        seed_test_agent_provider_and_agent(&mut config);
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let security = Arc::new(SecurityPolicy::for_agent(&config, TEST_AGENT).unwrap());
+        let tool = ScheduleTool::new(security, config, TEST_AGENT);
 
         let denied = tool
             .execute(json!({

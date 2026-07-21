@@ -1,5 +1,4 @@
 //! Arduino Uno Q Bridge — GPIO via socket to Bridge app.
-//!
 //! When ZeroClaw runs on Uno Q, the Bridge app (Python + MCU) exposes
 //! digitalWrite/digitalRead over a local socket. These tools connect to it.
 
@@ -8,7 +7,12 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use zeroclaw_api::attribution::ToolKind;
 use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool_attribution;
+
+tool_attribution!(UnoQGpioReadTool, ToolKind::Plugin);
+tool_attribution!(UnoQGpioWriteTool, ToolKind::Plugin);
 
 const BRIDGE_HOST: &str = "127.0.0.1";
 const BRIDGE_PORT: u16 = 9999;
@@ -17,7 +21,16 @@ async fn bridge_request(cmd: &str, args: &[String]) -> anyhow::Result<String> {
     let addr = format!("{}:{}", BRIDGE_HOST, BRIDGE_PORT);
     let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr))
         .await
-        .map_err(|_| anyhow::anyhow!("Bridge connection timed out"))??;
+        .map_err(|_| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"addr": addr, "phase": "connect"})),
+                "uno-q bridge connect timed out"
+            );
+            anyhow::Error::msg("Bridge connection timed out")
+        })??;
 
     let msg = format!("{} {}\n", cmd, args.join(" "));
     stream.write_all(msg.as_bytes()).await?;
@@ -25,7 +38,19 @@ async fn bridge_request(cmd: &str, args: &[String]) -> anyhow::Result<String> {
     let mut buf = vec![0u8; 64];
     let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf))
         .await
-        .map_err(|_| anyhow::anyhow!("Bridge response timed out"))??;
+        .map_err(|_| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "command": cmd,
+                        "phase": "response",
+                    })),
+                "uno-q bridge response timed out"
+            );
+            anyhow::Error::msg("Bridge response timed out")
+        })??;
     let resp = String::from_utf8_lossy(&buf[..n]).trim().to_string();
     Ok(resp)
 }
@@ -57,29 +82,35 @@ impl Tool for UnoQGpioReadTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let pin = args
-            .get("pin")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'pin' parameter"))?;
+        let pin = args.get("pin").and_then(|v| v.as_u64()).ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"tool": "gpio_read", "param": "pin"})),
+                "tool argument validation failed: missing parameter"
+            );
+            anyhow::Error::msg("Missing 'pin' parameter")
+        })?;
         match bridge_request("gpio_read", &[pin.to_string()]).await {
             Ok(resp) => {
                 if resp.starts_with("error:") {
                     Ok(ToolResult {
                         success: false,
-                        output: resp.clone(),
+                        output: resp.clone().into(),
                         error: Some(resp),
                     })
                 } else {
                     Ok(ToolResult {
                         success: true,
-                        output: resp,
+                        output: resp.into(),
                         error: None,
                     })
                 }
             }
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: format!("Bridge error: {}", e),
+                output: format!("Bridge error: {}", e).into(),
                 error: Some(e.to_string()),
             }),
         }
@@ -117,20 +148,32 @@ impl Tool for UnoQGpioWriteTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let pin = args
-            .get("pin")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'pin' parameter"))?;
-        let value = args
-            .get("value")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'value' parameter"))?;
+        let pin = args.get("pin").and_then(|v| v.as_u64()).ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"tool": "gpio_write", "param": "pin"})),
+                "tool argument validation failed: missing parameter"
+            );
+            anyhow::Error::msg("Missing 'pin' parameter")
+        })?;
+        let value = args.get("value").and_then(|v| v.as_u64()).ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"tool": "gpio_write", "param": "value"})),
+                "tool argument validation failed: missing parameter"
+            );
+            anyhow::Error::msg("Missing 'value' parameter")
+        })?;
         match bridge_request("gpio_write", &[pin.to_string(), value.to_string()]).await {
             Ok(resp) => {
                 if resp.starts_with("error:") {
                     Ok(ToolResult {
                         success: false,
-                        output: resp.clone(),
+                        output: resp.clone().into(),
                         error: Some(resp),
                     })
                 } else {
@@ -143,7 +186,7 @@ impl Tool for UnoQGpioWriteTool {
             }
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: format!("Bridge error: {}", e),
+                output: format!("Bridge error: {}", e).into(),
                 error: Some(e.to_string()),
             }),
         }

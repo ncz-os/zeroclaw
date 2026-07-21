@@ -1,19 +1,9 @@
 //! macOS sandbox-exec (Seatbelt) sandbox backend.
-//!
-//! Uses Apple's built-in `sandbox-exec` tool to enforce per-session Seatbelt
-//! profiles that restrict network access, filesystem writes, and process
-//! spawning. Policy files are generated in `.sb` format and written to a
-//! temporary directory that is cleaned up when the sandbox is dropped.
 
 use crate::security::traits::Sandbox;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// macOS sandbox-exec (Seatbelt) sandbox backend.
-///
-/// Generates per-session `.sb` policy files and wraps commands with
-/// `sandbox-exec -f <policy>`. The policy denies network and filesystem
-/// writes by default, allowing only the workspace directory.
 #[derive(Debug, Clone)]
 pub struct SeatbeltSandbox {
     /// Directory where per-session policy files are stored.
@@ -24,10 +14,16 @@ pub struct SeatbeltSandbox {
 
 impl SeatbeltSandbox {
     /// Create a new Seatbelt sandbox, generating a per-session policy file.
-    ///
     /// Returns an error if `sandbox-exec` is not available or the policy file
     /// cannot be written.
     pub fn new() -> std::io::Result<Self> {
+        Self::with_workspace(None)
+    }
+
+    /// Create a new Seatbelt sandbox for the provided workspace root.
+    /// If no workspace is provided, falls back to the process current
+    /// directory for compatibility with direct construction.
+    pub fn with_workspace(workspace: Option<&Path>) -> std::io::Result<Self> {
         if !Self::is_installed() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -41,7 +37,9 @@ impl SeatbeltSandbox {
         let session_id = uuid::Uuid::new_v4();
         let policy_path = policy_dir.join(format!("{session_id}.sb"));
 
-        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
+        let workspace = workspace
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")));
         let policy = generate_policy(&workspace);
         std::fs::write(&policy_path, &policy)?;
 
@@ -118,16 +116,24 @@ impl Sandbox for SeatbeltSandbox {
     }
 }
 
-/// Generate a Seatbelt `.sb` policy with restrictive defaults.
-///
-/// The policy:
-/// - Denies all network operations by default
-/// - Allows DNS lookups and outbound connections to localhost only
-/// - Denies filesystem writes outside the workspace and temp directories
-/// - Allows reads to system paths required for process execution
-/// - Restricts process spawning to essential operations
+fn seatbelt_string_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str(r"\\"),
+            '"' => escaped.push_str(r#"\""#),
+            '\n' => escaped.push_str(r"\n"),
+            '\r' => escaped.push_str(r"\r"),
+            '\t' => escaped.push_str(r"\t"),
+            c if c.is_control() => escaped.push('?'),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 fn generate_policy(workspace: &Path) -> String {
-    let workspace_str = workspace.to_string_lossy();
+    let workspace_str = seatbelt_string_literal(&workspace.to_string_lossy());
     format!(
         r#"(version 1)
 
@@ -240,6 +246,28 @@ mod tests {
         let workspace = PathBuf::from("/Users/test/project");
         let policy = generate_policy(&workspace);
         assert!(policy.contains("/Users/test/project"));
+    }
+
+    #[test]
+    fn generate_policy_escapes_workspace_path_string_literal() {
+        let workspace = PathBuf::from("/tmp/zc\"quote\\slash\nnewline");
+        let policy = generate_policy(&workspace);
+
+        assert!(policy.contains(r#"(subpath "/tmp/zc\"quote\\slash\nnewline")"#));
+        assert!(!policy.contains("zc\"quote\\slash\nnewline"));
+    }
+
+    #[test]
+    fn generate_policy_uses_provided_workspace_for_access_rules() {
+        let workspace = PathBuf::from("/tmp/zeroclaw-seatbelt-test-workspace");
+        let policy = generate_policy(&workspace);
+
+        assert!(
+            policy.contains(
+                r#"(allow file-read* (subpath "/tmp/zeroclaw-seatbelt-test-workspace"))"#
+            )
+        );
+        assert!(policy.contains(r#"(subpath "/tmp/zeroclaw-seatbelt-test-workspace")"#));
     }
 
     #[test]

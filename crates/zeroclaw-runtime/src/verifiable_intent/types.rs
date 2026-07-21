@@ -1,8 +1,4 @@
 //! Core data models for the Verifiable Intent credential chain.
-//!
-//! These types mirror the normative specification (credential-format.md,
-//! constraints.md) while staying idiomatic Rust.  Monetary amounts use integer
-//! minor-units (cents) per ISO 4217 throughout to eliminate decimal ambiguity.
 
 use serde::{Deserialize, Serialize};
 
@@ -246,7 +242,7 @@ pub struct Fulfillment {
 
 // ── Credential chain layers (serialized form) ────────────────────────
 
-/// Parsed representation of an L1 SD-JWT (credential provider → user).
+/// Parsed representation of an L1 SD-JWT (credential model_provider → user).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Layer1 {
     pub iss: String,

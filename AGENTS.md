@@ -1,8 +1,50 @@
-# AGENTS.md — ZeroClaw
+# AGENTS.md - ZeroClaw
 
-Cross-tool agent instructions for any AI coding assistant working on this repository.
+Core instructions for AI coding assistants working in this repository. Use `docs/book/src/contributing/architecture-map.md` to load only the references needed for a non-trivial task.
 
-## Commands
+## Single Source Of Truth
+
+Do not duplicate state. Before adding a struct field, config entry, schema field, runtime cache, or parallel lookup table, identify the canonical source:
+
+1. If the new field creates the fact, state that explicitly.
+2. If the fact already exists, resolve it from that source at use time.
+
+Prefer borrowed config, getters, resolver closures over live config, on-demand materialized views, or generated surfaces from one input. Do not snapshot live policy into long-lived handles. A restart-only snapshot is not a substitute for resolving canonical state.
+
+## Safety And Privacy
+
+- Never commit secrets, tokens, credentials, personal data, or real identities.
+- Do not weaken permissions, allowlists, sandboxing, approvals, or other trust boundaries without making the behavior and risk explicit.
+- New external surfaces default closed. Prefer allowlists to blocklists.
+- Do not hide behavior changes inside refactors or bypass failing checks.
+- Production paths must propagate errors. Avoid `unwrap()` and `expect()` unless a documented invariant makes panic impossible.
+- Do not suppress unused production code with underscore names or `#[allow(dead_code)]`; remove it, connect it, or track it. Underscore names remain valid for required but intentionally unused API, trait, or callback parameters.
+
+## Working Rules
+
+1. Read the owning module, factory wiring, adjacent tests, and relevant docs before editing.
+2. For architecture, config, security, workflow, governance, CI, release, or agent-assisted changes, start with `docs/book/src/contributing/architecture-map.md`.
+3. Name the source of truth before introducing state.
+4. Keep one concern per PR. Avoid unrelated cleanup and do not mix broad formatting changes with functional changes.
+5. Do not add heavy dependencies for minor convenience, speculative abstractions, or config keys and feature flags without a concrete use case.
+6. Add the smallest useful implementation and tests at the real behavior boundary.
+7. Validate at the change's risk level, report commands actually run, and document behavior, risk, side effects, and rollback.
+8. Use a non-`master` branch, open a PR to `master`, and never push directly to `master`.
+9. Use conventional commits and the full PR template. Prefer small PRs and do not add bot or AI attribution footers.
+10. Declare stacked work with `Depends on #...` and replacement work with `Supersedes #...`.
+
+Subagents must set their working directory to the repository root before shell or filesystem work. Do not assume an inherited working directory.
+
+## User-Facing Text
+
+- User-facing runtime CLI, tool, and onboarding text uses Fluent `fl!()` keys rather than bare literals.
+- Zerocode uses its independent Fluent catalogue through its documented `crate::i18n` helpers. Web dashboard text follows the TypeScript `web/src/lib/i18n.ts` contract, not Rust `fl!()`.
+- Logs, tracing fields, and panic text remain English and use stable error keys where the logging contract requires them.
+- English Markdown is the documentation source of truth. Follow the documented localization workflow instead of editing generated translations by hand.
+
+## Validation
+
+Choose checks that match the changed surface. Common code checks are:
 
 ```bash
 cargo fmt --all -- --check
@@ -10,120 +52,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Full pre-PR validation (recommended):
+Use `./dev/ci.sh all` for full pre-PR validation when the scope warrants it. Docs-only changes use `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh`. Bootstrap script changes add `bash -n install.sh`.
 
-```bash
-./dev/ci.sh all
-```
+## Task References
 
-Docs-only changes: run markdown lint and link-integrity checks. If touching bootstrap scripts: `bash -n install.sh`.
-
-## Project Snapshot
-
-ZeroClaw is a Rust-first autonomous agent runtime optimized for performance, efficiency, stability, extensibility, sustainability, and security.
-
-Core architecture is trait-driven and modular. Extend by implementing traits and registering in factory modules.
-
-Key extension points:
-
-- `crates/zeroclaw-api/src/provider.rs` (`Provider`)
-- `crates/zeroclaw-api/src/channel.rs` (`Channel`)
-- `crates/zeroclaw-api/src/tool.rs` (`Tool`)
-- `crates/zeroclaw-api/src/memory_traits.rs` (`Memory`)
-- `crates/zeroclaw-api/src/observability_traits.rs` (`Observer`)
-- `crates/zeroclaw-api/src/runtime_traits.rs` (`RuntimeAdapter`)
-- `crates/zeroclaw-api/src/peripherals_traits.rs` (`Peripheral`) — hardware boards (STM32, RPi GPIO)
-
-## Stability Tiers
-
-Every workspace crate carries a stability tier per the Microkernel Architecture RFC.
-
-| Crate | Tier | Notes |
-|-------|------|-------|
-| `zeroclaw-api` | Experimental | Stable at v1.0.0 (formal milestone) |
-| `zeroclaw-config` | Beta | Stable at v0.8.0 |
-| `zeroclaw-providers` | Beta | — |
-| `zeroclaw-memory` | Beta | — |
-| `zeroclaw-infra` | Beta | — |
-| `zeroclaw-tool-call-parser` | Beta | Stable at v0.8.0 |
-| `zeroclaw-channels` | Experimental | Plugin migration at v1.0.0 |
-| `zeroclaw-tools` | Experimental | Plugin migration at v1.0.0 |
-| `zeroclaw-runtime` | Experimental | Agent runtime (agent loop, security, cron, SOP, skills, observability) |
-| `zeroclaw-gateway` | Experimental | Separate binary at v0.9.0 |
-| `zeroclaw-tui` | Experimental | TUI onboarding wizard |
-| `zeroclaw-plugins` | Experimental | WASM plugin system — foundation for v1.0.0 plugin ecosystem |
-| `zeroclaw-hardware` | Experimental | USB discovery, peripherals, serial |
-| `zeroclaw-macros` | Beta | Tightly coupled to config schema |
-
-**Tiers**: Stable = covered by breaking-change policy. Beta = breaking changes permitted in MINOR with changelog notes. Experimental = no stability guarantee.
-
-Tiers are promoted, never demoted, through deliberate team decision.
-
-## Repository Map
-
-- `src/main.rs` — CLI entrypoint and command routing
-- `src/lib.rs` — module re-exports and CLI command enum definitions
-- `crates/zeroclaw-api/` — public trait definitions (Provider, Channel, Tool, Memory, Observer, Peripheral)
-- `crates/zeroclaw-config/` — schema, config loading/merging
-- `crates/zeroclaw-macros/` — Configurable derive macro
-- `crates/zeroclaw-providers/` — model providers and resilient wrapper
-- `crates/zeroclaw-channels/` — messaging platform integrations (30+ channels)
-- `crates/zeroclaw-channels/src/orchestrator/` — channel lifecycle, routing, media pipeline
-- `crates/zeroclaw-tools/` — tool execution surface (shell, file, memory, browser)
-- `crates/zeroclaw-runtime/` — agent loop, security, cron, SOP, skills, onboarding wizard, observability
-- `crates/zeroclaw-memory/` — memory backends (markdown, sqlite, embeddings, vector merge)
-- `crates/zeroclaw-infra/` — shared infrastructure (debounce, session, stall watchdog)
-- `crates/zeroclaw-gateway/` — webhook/gateway server (separate binary)
-- `crates/zeroclaw-hardware/` — USB discovery, peripherals, serial, GPIO
-- `crates/zeroclaw-tui/` — TUI onboarding wizard
-- `crates/zeroclaw-plugins/` — WASM plugin system
-- `crates/zeroclaw-tool-call-parser/` — tool call parsing
-- `docs/` — topic-based documentation (setup-guides, reference, ops, security, hardware, contributing, maintainers)
-- `.github/` — CI, templates, automation workflows
-
-## Risk Tiers
-
-- **Low risk**: docs/chore/tests-only changes
-- **Medium risk**: most `crates/*/src/**` behavior changes without boundary/security impact
-- **High risk**: `crates/zeroclaw-runtime/src/**` (especially `src/security/`), `crates/zeroclaw-gateway/src/**`, `crates/zeroclaw-tools/src/**`, `.github/workflows/**`, access-control boundaries
-
-When uncertain, classify as higher risk.
-
-## Workflow
-
-1. **Read before write** — inspect existing module, factory wiring, and adjacent tests before editing.
-2. **One concern per PR** — avoid mixed feature+refactor+infra patches.
-3. **Implement minimal patch** — no speculative abstractions, no config keys without a concrete use case.
-4. **Validate by risk tier** — docs-only: lightweight checks. Code changes: full relevant checks.
-5. **Document impact** — update PR notes for behavior, risk, side effects, and rollback.
-6. **Queue hygiene** — stacked PR: declare `Depends on #...`. Replacing old PR: declare `Supersedes #...`.
-
-Branch/commit/PR rules:
-- Work from a non-`master` branch. Open a PR to `master`; do not push directly.
-- Use conventional commit titles. Prefer small PRs (`size: XS/S/M`).
-- Follow `.github/pull_request_template.md` fully.
-- Never commit secrets, personal data, or real identity information (see `@docs/contributing/pr-discipline.md`).
-
-## Anti-Patterns
-
-- Do not add heavy dependencies for minor convenience.
-- Do not silently weaken security policy or access constraints.
-- Do not add speculative config/feature flags "just in case".
-- Do not mix massive formatting-only changes with functional changes.
-- Do not modify unrelated modules "while here".
-- Do not bypass failing checks without explicit explanation.
-- Do not hide behavior-changing side effects in refactor commits.
-- Do not include personal identity or sensitive information in test data, examples, docs, or commits.
-
-## Skills
-
-AI coding assistant skills live in `.claude/skills/`. Use the right one for the job:
-
-- `.claude/skills/github-pr-review-session/SKILL.md` — PR review co-pilot; assists **you** as the human reviewer. Posts reviews as WareWolf-MoonWall using the RFC feedback taxonomy (🔴/🟡/✅/🔵/🟢). Trigger: `review 1234`, `re-review 1234`, `go through the queue`.
-- `.claude/skills/changelog-generation/SKILL.md` — generates `CHANGELOG-next.md` between stable tags, resolves contributors via GraphQL, feeds the release workflow. Trigger: `generate changelog`, `release notes for v0.7.x`.
-
-## Linked References
-
-- `@docs/contributing/change-playbooks.md` — adding providers, channels, tools, peripherals; security/gateway changes; architecture boundaries
-- `@docs/contributing/pr-discipline.md` — privacy rules, superseded-PR attribution/templates, handoff template
-- `@docs/contributing/docs-contract.md` — docs system contract, i18n rules, locale parity
+The architecture map routes task-specific documentation. Consult `docs/book/src/contributing/agent-guidelines.md` only for detailed agent examples, risk and stability policy, skill discovery, and protected operational documents. Do not skip a required contract because it is no longer embedded in this bootstrap file.

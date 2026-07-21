@@ -3,12 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::process::Command;
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::policy::ToolOperation;
 use zeroclaw_config::schema::ClaudeCodeRunnerConfig;
 
-/// Environment variables safe to pass through to the `claude` subprocess.
 const SAFE_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
 ];
@@ -28,21 +27,10 @@ pub struct ClaudeCodeHookEvent {
     pub summary: Option<String>,
 }
 
-/// Spawns Claude Code inside a tmux session with HTTP hooks that POST tool
-/// execution events back to ZeroClaw's gateway endpoint, enabling live Slack
-/// progress updates and SSH session handoff.
-///
-/// Unlike [`ClaudeCodeTool`](super::claude_code::ClaudeCodeTool) which runs
-/// `claude -p` inline and waits for completion, this runner:
-///
-/// 1. Creates a named tmux session (`<prefix><id>`)
-/// 2. Launches `claude` inside it with `--hook-url` pointing at the gateway
-/// 3. Returns immediately with the session ID and an SSH attach command
-/// 4. Receives streamed progress via the `/hooks/claude-code` endpoint
 pub struct ClaudeCodeRunnerTool {
     security: Arc<SecurityPolicy>,
     config: ClaudeCodeRunnerConfig,
-    /// Base URL of the ZeroClaw gateway (e.g. "http://localhost:3000").
+    /// Base URL of the ZeroClaw gateway (e.g. `"http://localhost:3000"`).
     gateway_url: String,
 }
 
@@ -105,14 +93,8 @@ impl Tool for ClaudeCodeRunnerTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        // Rate limit check
-        if self.security.is_rate_limited() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
-            });
-        }
+        // Rate limiting is applied by the RateLimitedTool wrapper at
+        // registration time (see zeroclaw-runtime::tools::mod).
 
         // Enforce act policy
         if let Err(error) = self
@@ -121,27 +103,38 @@ impl Tool for ClaudeCodeRunnerTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(error),
             });
         }
 
         // Extract prompt (required)
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'prompt' parameter"))?;
+        let prompt = args.get("prompt").and_then(|v| v.as_str()).ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"param": "prompt"})),
+                "claude_code_runner: missing prompt parameter"
+            );
+            anyhow::Error::msg("Missing 'prompt' parameter")
+        })?;
 
         // Validate working directory
         let work_dir = if let Some(wd) = args.get("working_directory").and_then(|v| v.as_str()) {
             let wd_path = std::path::PathBuf::from(wd);
+            let wd_path = if wd_path.is_relative() {
+                self.security.workspace_dir.join(&wd_path)
+            } else {
+                wd_path
+            };
             let workspace = &self.security.workspace_dir;
             let canonical_wd = match wd_path.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(format!(
                             "working_directory '{}' does not exist or is not accessible",
                             wd
@@ -154,7 +147,7 @@ impl Tool for ClaudeCodeRunnerTool {
                 Err(_) => {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: ToolOutput::default(),
                         error: Some(format!(
                             "workspace directory '{}' does not exist or is not accessible",
                             workspace.display()
@@ -165,7 +158,7 @@ impl Tool for ClaudeCodeRunnerTool {
             if !canonical_wd.starts_with(&canonical_ws) {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!(
                         "working_directory '{}' is outside the workspace '{}'",
                         wd,
@@ -182,15 +175,6 @@ impl Tool for ClaudeCodeRunnerTool {
             .get("slack_channel")
             .and_then(|v| v.as_str())
             .map(String::from);
-
-        // Record action budget
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: action budget exhausted".into()),
-            });
-        }
 
         // Generate a unique session ID
         let session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
@@ -234,7 +218,11 @@ impl Tool for ClaudeCodeRunnerTool {
         let create_result = Command::new("tmux")
             .args(["new-session", "-d", "-s", &session_name])
             .arg("-c")
-            .arg(work_dir.to_str().unwrap_or("."))
+            .arg(
+                crate::util_helpers::clean_verbatim_path(&work_dir)
+                    .to_str()
+                    .unwrap_or("."),
+            )
             .output()
             .await;
 
@@ -243,14 +231,14 @@ impl Tool for ClaudeCodeRunnerTool {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!("Failed to create tmux session: {stderr}")),
                 });
             }
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!(
                         "tmux not found or failed to execute: {e}. Install tmux to use claude_code_runner."
                     )),
@@ -283,7 +271,7 @@ impl Tool for ClaudeCodeRunnerTool {
                 .await;
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!("Failed to send command to tmux session: {e}")),
             });
         }
@@ -291,14 +279,16 @@ impl Tool for ClaudeCodeRunnerTool {
         // Schedule session TTL cleanup
         let ttl = self.config.session_ttl;
         let cleanup_session = session_name.clone();
-        tokio::spawn(async move {
+        zeroclaw_spawn::spawn!(async move {
             tokio::time::sleep(std::time::Duration::from_secs(ttl)).await;
             let _ = Command::new("tmux")
                 .args(["kill-session", "-t", &cleanup_session])
                 .output()
                 .await;
-            tracing::info!(
-                session = cleanup_session,
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({"session": cleanup_session})),
                 "Claude Code runner session TTL expired, cleaned up"
             );
         });
@@ -324,7 +314,7 @@ impl Tool for ClaudeCodeRunnerTool {
 
         Ok(ToolResult {
             success: true,
-            output: output_parts.join("\n"),
+            output: output_parts.join("\n").into(),
             error: None,
         })
     }

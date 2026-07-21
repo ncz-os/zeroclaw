@@ -6,11 +6,6 @@ pub struct ClassificationDecision {
     pub priority: i32,
 }
 
-/// Classify a user message against the configured rules and return the
-/// matching hint string, if any.
-///
-/// Returns `None` when classification is disabled, no rules are configured,
-/// or no rule matches the message.
 pub fn classify(config: &QueryClassificationConfig, message: &str) -> Option<String> {
     classify_with_decision(config, message).map(|decision| decision.hint)
 }
@@ -29,7 +24,7 @@ pub fn classify_with_decision(
     let len = message.len();
 
     let mut rules: Vec<_> = config.rules.iter().collect();
-    rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
 
     for rule in rules {
         // Length constraints

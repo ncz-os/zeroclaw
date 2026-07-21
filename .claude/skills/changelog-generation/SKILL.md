@@ -13,14 +13,8 @@ checked out and up to date.
 
 ## Before You Start
 
-Read the protocol reference before doing anything else:
-
-- `docs/contributing/changelog-generation.md` — **the full procedure**; follow it
-  exactly for every run. It defines the commit range logic, categorisation rules,
-  GraphQL contributor resolution, filter lists, output format, and release workflow
-  integration.
-
-Do not skip it. Do not rely on memory of a prior run.
+This SKILL.md is the full, self-contained procedure. Follow the workflow below
+exactly on every run; do not rely on memory of a prior run.
 
 ---
 
@@ -48,14 +42,16 @@ release notes v0.7.1 to v0.7.2
 
 ### Phase 1 — Establish the range
 
-1. If the user provided a range, normalise it to `<from>..<to>` per the table in
-   the protocol §1.
-2. If no range was given, resolve the last stable tag automatically:
+1. If the user provided a range, normalise to `<from>..<to>`: `vX` → `vX..HEAD`;
+   `vX..vY` → as given; `vX vY` → `vX..vY`.
+2. If no range was given, resolve the last stable tag automatically. Both
+   `-beta.N` (older) and `-beta-N` (current) pre-release formats exist, so anchor
+   on a plain version shape rather than excluding a `-beta` separator:
    ```bash
-   git tag --sort=-creatordate | grep -vE '\-beta\.' | head -1
+   git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
    ```
-3. Verify both refs exist before proceeding. If either is missing, stop and tell
-   the user what was not found.
+3. Verify both refs exist (`git rev-parse --verify`). If either is missing, stop
+   and tell the user what was not found.
 4. Report the resolved range to the user before continuing.
 
 ### Phase 2 — Collect and categorise commits
@@ -71,21 +67,50 @@ git log <from>..<to> --pretty=format:"%H %h %s" --no-merges
 git log <from>..<to> --pretty=format:"%H" --no-merges
 ```
 
-Categorise every commit per the prefix table in protocol §2. Commits without a
-recognised prefix must be read and categorised by content — do not drop them.
+Map each commit to a section by its conventional-commit prefix. Read and
+categorise prefix-less commits by content; never drop one silently.
+
+| Prefix | Section |
+|---|---|
+| `feat` | What's New |
+| `fix` | Bug Fixes |
+| `refactor`, `perf` | What's New (as "Improvements") |
+| `security`, security-scoped `fix` | What's New → Security |
+| `docs` | What's New → Documentation (omit trivial typos) |
+| `chore`, `ci`, `build` | Omit unless user-visible (install path, dropped platform) |
+| `!` suffix / `BREAKING CHANGE` | Breaking Changes (always surface) |
 
 ### Phase 3 — Resolve contributors
 
-Use the GitHub GraphQL `authors` API per protocol §3. Do not use `git log
---pretty=format:"%an"` alone — it misses `Co-Authored-By` contributors.
+Use the GitHub GraphQL commit `authors` field (returns author + co-authors). Do
+not use `git log --pretty=format:"%an"` alone — it misses `Co-Authored-By`
+contributors.
 
-Paginate in batches of 100. Cross-reference each `oid` against the SHA list from
-Phase 2 to restrict results to the release range. Apply the full filter list from
-protocol §3 (bots, noreply addresses, AI model names).
+```bash
+gh api graphql -f query='
+{ repository(owner:"zeroclaw-labs", name:"zeroclaw") {
+    ref(qualifiedName:"refs/heads/master") { target { ... on Commit {
+      history(first:100) {
+        pageInfo { hasNextPage endCursor }
+        nodes { oid authors(first:10) { nodes { user { login } email } } }
+      } } } } } }'
+```
+
+Page by adding `after:"<endCursor>"` while `hasNextPage` is true. Cross-reference
+each `oid` against the Phase 2 SHA list to stay in range, collect unique logins,
+then exclude:
+
+- logins ending in `[bot]`, plus `web-flow`, `dependabot`, `github-actions`,
+  `blacksmith`
+- emails matching `*noreply*`
+- AI model names as author names: `Claude`, `Copilot`, `ChatGPT`, `Codex`,
+  `Gemini`, and anything matching `^(gpt|claude|gemini|copilot)-`
+
+Sort case-insensitively and prefix each with `@`.
 
 ### Phase 4 — Write the changelog
 
-Follow the format spec in protocol §4 exactly:
+Write these sections in order; omit any with no content:
 
 1. Preamble (2–3 sentences — release theme, scale, reader context)
 2. Highlights (4–6 user-visible bullet points)
@@ -130,9 +155,8 @@ to `master` directly.
 
 ## Execution rules
 
-1. **Always read `docs/contributing/changelog-generation.md` first.** The protocol
-   file is authoritative. If anything in this skill conflicts with it, the protocol
-   wins.
+1. **This SKILL.md is self-contained and authoritative.** Follow the phases
+   above; do not look for a separate protocol file.
 2. **Always report the resolved range before doing any work.** The user should
    confirm the range is correct before you collect commits.
 3. **Never drop commits silently.** Every commit in the range must be accounted for
@@ -147,5 +171,6 @@ to `master` directly.
 7. **Always confirm before committing.** Show the user the exact commit message
    and ask for an explicit yes. Do not infer consent from prior steps.
 8. **Never push to `master` directly.** Always push to the open release PR branch.
-9. **Never delete `CHANGELOG-next.md` manually.** The release workflow deletes it
-   automatically after a successful stable release.
+9. **Do not delete `CHANGELOG-next.md` manually.** The file is intentionally left on
+   `master` between releases and is overwritten at the start of the next release cycle.
+   No cleanup is needed after a release ships.

@@ -1,13 +1,23 @@
 //! WASM plugin system for ZeroClaw.
-//!
-//! Plugins are WebAssembly modules loaded via Extism that can extend
-//! ZeroClaw with custom tools and channels. Enable with `--features plugins-wasm`.
+//! Plugins are WebAssembly components loaded via wasmtime that can extend
+//! ZeroClaw with custom tools and channels. Enable with a `plugins-wasm*` feature.
 
+#[cfg(feature = "plugins-wasmtime")]
+pub mod component;
+#[cfg(feature = "plugins-wasmtime")]
+mod component_logging;
 pub mod error;
 pub mod host;
+pub mod instance;
+pub mod registry;
+#[cfg(feature = "plugins-wasmtime")]
 pub mod runtime;
 pub mod signature;
+#[cfg(feature = "plugins-wasmtime")]
 pub mod wasm_channel;
+#[cfg(feature = "plugins-wasmtime")]
+pub mod wasm_memory;
+#[cfg(feature = "plugins-wasmtime")]
 pub mod wasm_tool;
 
 use serde::{Deserialize, Serialize};
@@ -24,8 +34,11 @@ pub struct PluginManifest {
     pub description: Option<String>,
     /// Author name or organization
     pub author: Option<String>,
-    /// Path to the .wasm file (relative to manifest)
-    pub wasm_path: String,
+    /// Path to the .wasm file (relative to manifest).
+    /// Required for tool/channel/memory/observer plugins; optional (and ignored)
+    /// for skill-only plugins, which carry no WASM payload.
+    #[serde(default)]
+    pub wasm_path: Option<String>,
     /// Capabilities this plugin provides
     pub capabilities: Vec<PluginCapability>,
     /// Permissions this plugin requests
@@ -41,7 +54,7 @@ pub struct PluginManifest {
 }
 
 /// What a plugin can do.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginCapability {
     /// Provides one or more tools
@@ -52,10 +65,12 @@ pub enum PluginCapability {
     Memory,
     /// Provides an observer/metrics backend
     Observer,
+    /// Provides one or more agentskills.io-format skills under `skills/`
+    Skill,
 }
 
 /// Permissions a plugin may request.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPermission {
     /// Can make HTTP requests
@@ -64,8 +79,9 @@ pub enum PluginPermission {
     FileRead,
     /// Can write to the filesystem (within sandbox)
     FileWrite,
-    /// Can access environment variables
-    EnvRead,
+    /// Can read its own resolved per-plugin config section
+    #[serde(alias = "env_read")]
+    ConfigRead,
     /// Can read agent memory
     MemoryRead,
     /// Can write agent memory
@@ -80,6 +96,7 @@ pub struct PluginInfo {
     pub description: Option<String>,
     pub capabilities: Vec<PluginCapability>,
     pub permissions: Vec<PluginPermission>,
-    pub wasm_path: PathBuf,
+    /// Resolved path to the WASM file. `None` for skill-only plugins.
+    pub wasm_path: Option<PathBuf>,
     pub loaded: bool,
 }
