@@ -48,7 +48,7 @@ pub async fn load(
     backend: Arc<dyn SessionBackend>,
     session_key: String,
 ) -> io::Result<Vec<zeroclaw_api::model_provider::ChatMessage>> {
-    spawn_blocking_session_op(move || Ok(backend.load(&session_key))).await
+    spawn_blocking_session_op(move || backend.load(&session_key)).await
 }
 
 /// Convenience: append off the blocking pool.
@@ -64,7 +64,7 @@ pub async fn append(
 pub async fn list_sessions_with_metadata(
     backend: Arc<dyn SessionBackend>,
 ) -> io::Result<Vec<zeroclaw_infra::session_backend::SessionMetadata>> {
-    spawn_blocking_session_op(move || Ok(backend.list_sessions_with_metadata())).await
+    spawn_blocking_session_op(move || backend.list_sessions_with_metadata()).await
 }
 
 /// Convenience: delete_session off the blocking pool.
@@ -89,7 +89,7 @@ pub async fn search(
     backend: Arc<dyn SessionBackend>,
     query: zeroclaw_infra::session_backend::SessionQuery,
 ) -> io::Result<Vec<zeroclaw_infra::session_backend::SessionMetadata>> {
-    spawn_blocking_session_op(move || Ok(backend.search(&query))).await
+    spawn_blocking_session_op(move || backend.search(&query)).await
 }
 
 /// Convenience: get_session_state off the blocking pool.

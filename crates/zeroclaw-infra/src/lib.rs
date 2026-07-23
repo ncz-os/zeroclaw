@@ -10,29 +10,6 @@ pub mod session_postgres;
 pub mod session_queue;
 pub mod session_sqlite;
 pub mod session_store;
-// ── Multi-database session backend series (PR 2 of N) ─────────────────
-//
-// PR 2 of the resubmission series (foundation, then MySQL/MariaDB,
-// then Postgres, then Db2, then Oracle) lands the MySQL + MariaDB
-// driver implementations on top of the factory / `spawn_blocking`
-// plumbing from PR 1 (`feat/session-backend-foundation`, merged as
-// the series root).
-//
-// Both `backend-mysql` and `backend-mariadb` enable the same
-// `mysql` crate (MySQL and MariaDB speak the same wire protocol
-// and accept the same SQL for every operation we issue), so the
-// actual `SessionBackend` impl lives once in `session_mysql_shared`
-// and the two per-engine modules in `session_mysql.rs` /
-// `session_mariadb.rs` are thin newtype wrappers. The shared
-// module is `pub(crate)` because callers go through the wrappers
-// — the `Engine` enum is a private implementation detail
-// that an operator should never see.
-#[cfg(feature = "backend-mariadb")]
-pub mod session_mariadb;
-#[cfg(feature = "backend-mysql")]
-pub mod session_mysql;
-#[cfg(any(feature = "backend-mysql", feature = "backend-mariadb"))]
-pub(crate) mod session_mysql_shared;
 pub mod stall_watchdog;
 
 use std::net::SocketAddr;
@@ -60,6 +37,10 @@ pub fn fallback_gateway_bind_socket_addr(port: u16) -> SocketAddr {
 pub fn make_session_backend(
     workspace_dir: &Path,
     backend: &str,
+    #[cfg_attr(not(feature = "backend-postgres"), allow(unused_variables))] postgres_url: Option<
+        &str,
+    >,
+    #[cfg_attr(not(feature = "backend-postgres"), allow(unused_variables))] pool_size: u32,
 ) -> std::io::Result<Arc<dyn SessionBackend>> {
     match backend {
         "jsonl" => {
@@ -67,87 +48,59 @@ pub fn make_session_backend(
             Ok(Arc::new(store))
         }
         "sqlite" => Ok(Arc::new(open_sqlite_with_jsonl_import(workspace_dir)?)),
-        // ── Multi-database session backend series (PR 1 of N) ──────
+        // ── PostgreSQL session backend ────────────────────────────
         //
-        // Each known remote backend name is recognized as a value for
-        // `channels.session_backend`. The matching driver implementation
-        // lands in its own follow-up PR (MySQL/MariaDB, then Postgres,
-        // then Db2, then Oracle), guarded by the per-backend Cargo
-        // feature so the driver crate / native client / TLS stack is
-        // only pulled in when the operator opts in.
-        //
-        // Until a given follow-up PR ships, that backend name resolves
-        // to a `#[cfg(not(feature = "backend-<name>"))]` arm that
-        // hard-fails at startup. This is a deliberately explicit
-        // shape: a known backend whose Cargo feature is not
-        // compiled into this binary must NOT silently route sessions
-        // to SQLite — that would split session history across a fleet.
-        //
-        // Each subsequent per-database PR only needs to add ONE arm:
-        //   #[cfg(feature = "backend-<name>")]
-        //   "<name>" => Ok(Arc::new(<that backend's ctor>(...)?)),
-        // …plus its own module. The dispatcher's overall shape does
-        // not need to change.
-        #[cfg(not(feature = "backend-postgres"))]
-        "postgres" => Err(uncompiled_backend_error("postgres")),
+        // The PostgreSQL backend is the only supported remote session
+        // backend in this release.
         #[cfg(feature = "backend-postgres")]
         "postgres" => {
-            // The blocking PostgreSQL client is pooled with r2d2. The
-            // connection URL and pool size resolve from the canonical
-            // dotted-path channel configuration environment overrides.
-            let backend = session_postgres::PostgresSessionBackend::new(
-                workspace_dir,
-                session_postgres::read_pool_size(),
-            )?;
+            let url = postgres_url.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    anyhow::Error::msg(
+                        "session_backend=postgres requires postgres_url to be \
+                      provided in the resolved channel config.",
+                    )
+                    .to_string(),
+                )
+            })?;
+            // Validate pool_size to prevent connection pool failures
+            if pool_size == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    anyhow::Error::msg("pool_size must be at least 1")
+                        .context("session backend configuration error")
+                        .to_string(),
+                ));
+            }
+            // Validate postgres_url scheme for fail-fast on malformed strings
+            let url_lower = url.to_lowercase();
+            if !(url_lower.starts_with("postgresql://") || url_lower.starts_with("postgres://")) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    anyhow::Error::msg(
+                        "postgres_url must start with 'postgresql://' or 'postgres://'",
+                    )
+                    .context("session backend configuration error")
+                    .to_string(),
+                ));
+            }
+            let backend = session_postgres::PostgresSessionBackend::new_with_url(url, pool_size)?;
             Ok(Arc::new(backend))
         }
-        #[cfg(not(feature = "backend-mysql"))]
-        "mysql" => Err(uncompiled_backend_error("mysql")),
-        #[cfg(feature = "backend-mysql")]
-        "mysql" => {
-            // PR 2 of the multi-database session backend series
-            // (builds on PR 1 = `feat/session-backend-foundation`).
-            // The MySQL backend reads `ZEROCLAW_channels__mysql_url`
-            // (the canonical config-override env var documented on
-            // `ChannelsConfig.mysql_url`) and falls back to
-            // `ZEROCLAW_TEST_MYSQL_URL` for the live-DB integration
-            // tests. Pool size comes from
-            // `ZEROCLAW_channels__pool_size`.
-            let backend = session_mysql::MySqlSessionBackend::new(
-                workspace_dir,
-                crate::session_mysql_shared::read_pool_size(),
-            )?;
-            Ok(Arc::new(backend))
-        }
-        #[cfg(not(feature = "backend-mariadb"))]
-        "mariadb" => Err(uncompiled_backend_error("mariadb")),
-        #[cfg(feature = "backend-mariadb")]
-        "mariadb" => {
-            // Mirror of the MySQL arm above — distinct module so an
-            // operator selecting `session_backend = "mariadb"` sees a
-            // distinct error message in logs (vs
-            // `session_backend = "mysql"`). Reads
-            // `ZEROCLAW_channels__mariadb_url` then falls back to
-            // `ZEROCLAW_TEST_MARIADB_URL`.
-            let backend = session_mariadb::MariaDbSessionBackend::new(
-                workspace_dir,
-                crate::session_mysql_shared::read_pool_size(),
-            )?;
-            Ok(Arc::new(backend))
-        }
-        #[cfg(not(feature = "backend-oracle"))]
-        "oracle" => Err(uncompiled_backend_error("oracle")),
-        #[cfg(not(feature = "backend-db2"))]
-        "db2" => Err(uncompiled_backend_error("db2")),
+        #[cfg(not(feature = "backend-postgres"))]
+        "postgres" => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "session_backend 'postgres' requires the 'backend-postgres' \
+             Cargo feature to be enabled. Rebuild with \
+             `--features backend-postgres`.",
+        )),
         other => {
             // Genuinely-unrecognized value (typo, leftover legacy
             // config, …). There is no live connection to risk — the
             // operator simply misspelled the backend name — so we
             // stay forgiving and route to the default local backend,
-            // matching the pre-existing soft-fallback contract. The
-            // WARN body inlines the actual offending string so the
-            // operator can spot the typo in their logs instead of an
-            // empty-interpolation message that hides the real value.
+            // matching the pre-existing soft-fallback contract.
             let other = other.to_string();
             ::zeroclaw_log::record!(
                 WARN,
@@ -156,9 +109,7 @@ pub fn make_session_backend(
                     .with_attrs(::serde_json::json!({"other": &other})),
                 &format!(
                     "Unknown session_backend '{other}'; falling back to sqlite. \
-                     Valid values: 'sqlite' (default), 'jsonl', \
-                     'postgres', 'mysql', 'mariadb', 'oracle', 'db2' \
-                     (remote backends require their own Cargo feature to be enabled)."
+                     Valid values: 'sqlite' (default), 'jsonl', 'postgres'."
                 )
             );
             Ok(Arc::new(open_sqlite_with_jsonl_import(workspace_dir)?))
@@ -170,6 +121,7 @@ pub fn make_session_backend(
 /// operator selected but whose Cargo feature was not compiled into this
 /// binary. The discriminant is part of the error message so it's
 /// grep-able from logs.
+#[allow(dead_code)]
 fn uncompiled_backend_error(name: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -226,9 +178,9 @@ mod tests {
     #[test]
     fn make_session_backend_jsonl_round_trips_through_session_store() {
         let tmp = TempDir::new().unwrap();
-        let backend = make_session_backend(tmp.path(), "jsonl").unwrap();
+        let backend = make_session_backend(tmp.path(), "jsonl", None, 5).unwrap();
         backend.append("k1", &user_msg("hello-jsonl")).unwrap();
-        let loaded = backend.load("k1");
+        let loaded = backend.load("k1").unwrap();
         assert_eq!(loaded.len(), 1);
         // The JSONL backend writes one file per session key.
         let jsonl = tmp.path().join("sessions").join("k1.jsonl");
@@ -238,9 +190,9 @@ mod tests {
     #[test]
     fn make_session_backend_sqlite_round_trips_through_sqlite_db() {
         let tmp = TempDir::new().unwrap();
-        let backend = make_session_backend(tmp.path(), "sqlite").unwrap();
+        let backend = make_session_backend(tmp.path(), "sqlite", None, 5).unwrap();
         backend.append("k1", &user_msg("hello-sqlite")).unwrap();
-        let loaded = backend.load("k1");
+        let loaded = backend.load("k1").unwrap();
         assert_eq!(loaded.len(), 1);
         let db = tmp.path().join("sessions").join("sessions.db");
         assert!(db.exists(), "sqlite db must be written under sessions/");
@@ -251,7 +203,7 @@ mod tests {
     #[test]
     fn make_session_backend_unknown_value_falls_back_to_sqlite() {
         let tmp = TempDir::new().unwrap();
-        let backend = make_session_backend(tmp.path(), "totally-not-a-backend").unwrap();
+        let backend = make_session_backend(tmp.path(), "totally-not-a-backend", None, 5).unwrap();
         backend.append("k1", &user_msg("hello-fallback")).unwrap();
         let db = tmp.path().join("sessions").join("sessions.db");
         assert!(
@@ -268,11 +220,11 @@ mod tests {
         // operator can roll back.
         let tmp = TempDir::new().unwrap();
         {
-            let jsonl = make_session_backend(tmp.path(), "jsonl").unwrap();
+            let jsonl = make_session_backend(tmp.path(), "jsonl", None, 5).unwrap();
             jsonl.append("legacy", &user_msg("from-jsonl")).unwrap();
         }
-        let sqlite = make_session_backend(tmp.path(), "sqlite").unwrap();
-        let loaded = sqlite.load("legacy");
+        let sqlite = make_session_backend(tmp.path(), "sqlite", None, 5).unwrap();
+        let loaded = sqlite.load("legacy").unwrap();
         assert_eq!(
             loaded.len(),
             1,
@@ -307,7 +259,7 @@ mod tests {
     /// degrade or hard-stop.
     fn assert_fail_fast_uncompiled(name: &str) {
         let tmp = TempDir::new().unwrap();
-        let result = make_session_backend(tmp.path(), name);
+        let result = make_session_backend(tmp.path(), name, None, 5);
         let err = match result {
             Ok(_) => panic!(
                 "backend '{name}' must fail-fast when its Cargo feature is \
@@ -339,28 +291,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "backend-mysql"))]
-    fn make_session_backend_mysql_fail_fast_when_feature_disabled() {
-        assert_fail_fast_uncompiled("mysql");
-    }
-
-    #[test]
-    #[cfg(not(feature = "backend-mariadb"))]
-    fn make_session_backend_mariadb_fail_fast_when_feature_disabled() {
-        assert_fail_fast_uncompiled("mariadb");
-    }
-
-    #[test]
-    fn make_session_backend_oracle_fail_fast_when_feature_disabled() {
-        assert_fail_fast_uncompiled("oracle");
-    }
-
-    #[test]
-    fn make_session_backend_db2_fail_fast_when_feature_disabled() {
-        assert_fail_fast_uncompiled("db2");
-    }
-
-    #[test]
     fn make_session_backend_unknown_value_warn_message_inlines_offending_value() {
         // Regression guard: an earlier implementation once
         // logged `Unknown session_backend ''; falling back to sqlite`
@@ -380,9 +310,7 @@ mod tests {
         let value = "definitely-not-a-real-backend";
         let body = format!(
             "Unknown session_backend '{value}'; falling back to sqlite. \
-             Valid values: 'sqlite' (default), 'jsonl', \
-             'postgres', 'mysql', 'mariadb', 'oracle', 'db2' \
-             (remote backends require their own Cargo feature to be enabled)."
+             Valid values: 'sqlite' (default), 'jsonl', 'postgres'."
         );
         assert!(
             body.contains(value),
@@ -392,6 +320,28 @@ mod tests {
             !body.contains("Unknown session_backend ''"),
             "WARN body must not regress to empty-interpolation; got: {body}"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "backend-postgres")]
+    fn make_session_backend_postgres_validates_url_scheme() {
+        // Test that postgres_url with invalid scheme fails fast
+        let tmp = TempDir::new().unwrap();
+
+        // Invalid scheme - should fail with InvalidInput immediately
+        let result =
+            make_session_backend(tmp.path(), "postgres", Some("mysql://localhost/test"), 5);
+        match result {
+            Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput),
+            Ok(_) => panic!("invalid postgres_url scheme should fail"),
+        }
+
+        // Invalid scheme variations
+        let result = make_session_backend(tmp.path(), "postgres", Some("http://localhost/test"), 5);
+        match result {
+            Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput),
+            Ok(_) => panic!("invalid postgres_url scheme should fail"),
+        }
     }
 
     #[test]
@@ -406,7 +356,7 @@ mod tests {
         // no live connection at risk, so we keep the lenient
         // fallback this factory has always used for that case.
         let tmp = TempDir::new().unwrap();
-        let backend = make_session_backend(tmp.path(), "completely-bogus-typo").unwrap();
+        let backend = make_session_backend(tmp.path(), "completely-bogus-typo", None, 5).unwrap();
         backend.append("k1", &user_msg("hello-fallback")).unwrap();
         let db = tmp.path().join("sessions").join("sessions.db");
         assert!(

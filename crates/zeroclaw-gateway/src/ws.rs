@@ -891,7 +891,23 @@ fn persist_conversation_messages(
     // the post-turn persistence, don't resurrect it. The `aborted` / `done`
     // / `error` frames are still sent to the client; we just refuse to
     // re-create the row that `DELETE /api/sessions/{id}` just wiped.
-    if !backend.session_exists(session_key) {
+    // Propagate session_exists errors instead of swallowing them as false.
+    let exists = match backend.session_exists(session_key) {
+        Ok(exists) => exists,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(
+                        ::serde_json::json!({"session_key": session_key, "error": format!("{e}")})
+                    ),
+                "session_exists check failed; skipping persist"
+            );
+            return;
+        }
+    };
+    if !exists {
         return;
     }
     for message in messages {
@@ -2093,8 +2109,11 @@ mod tests {
     }
 
     impl zeroclaw_infra::session_backend::SessionBackend for DeletedSessionBackend {
-        fn load(&self, _session_key: &str) -> Vec<zeroclaw_providers::ChatMessage> {
-            Vec::new()
+        fn load(
+            &self,
+            _session_key: &str,
+        ) -> std::io::Result<Vec<zeroclaw_providers::ChatMessage>> {
+            Ok(Vec::new())
         }
         fn append(
             &self,
@@ -2110,12 +2129,12 @@ mod tests {
         fn remove_last(&self, _session_key: &str) -> std::io::Result<bool> {
             Ok(false)
         }
-        fn list_sessions(&self) -> Vec<String> {
-            Vec::new()
+        fn list_sessions(&self) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
         }
-        fn session_exists(&self, _session_key: &str) -> bool {
+        fn session_exists(&self, _session_key: &str) -> std::io::Result<bool> {
             // The user deleted the session between cancel and append.
-            false
+            Ok(false)
         }
     }
 

@@ -896,7 +896,17 @@ impl RpcDispatcher {
             .ctx
             .session_backend
             .as_ref()
-            .map(|b| b.list_sessions_with_metadata().len())
+            .map(|b| {
+                b.list_sessions_with_metadata()
+                    .map(|sessions| sessions.len())
+                    .map_err(|e| {
+                        rpc_err(
+                            INTERNAL_ERROR,
+                            format!("Failed to list persisted sessions: {e}"),
+                        )
+                    })
+            })
+            .transpose()?
             .unwrap_or(0);
         let total = ids.len().max(persisted_count);
         to_result(StatusResult {
@@ -3361,7 +3371,13 @@ impl RpcDispatcher {
         let rpc_counts = self.ctx.sessions.count_by_agent().await;
         let mut backend_counts = std::collections::HashMap::<String, usize>::new();
         if let Some(ref backend) = self.ctx.session_backend {
-            for meta in backend.list_sessions_with_metadata() {
+            let sessions = backend.list_sessions_with_metadata().map_err(|e| {
+                rpc_err(
+                    INTERNAL_ERROR,
+                    format!("Failed to list sessions from backend: {e}"),
+                )
+            })?;
+            for meta in sessions {
                 let alias = meta.agent_alias.or_else(|| {
                     meta.channel_id
                         .as_deref()
@@ -7576,7 +7592,10 @@ mod tests {
         );
 
         assert!(
-            chat_backend.load(&format!("rpc_{sid}")).is_empty(),
+            chat_backend
+                .load(&format!("rpc_{sid}"))
+                .expect("load session")
+                .is_empty(),
             "ACP session must NOT touch chat session_backend"
         );
     }
@@ -7648,7 +7667,7 @@ mod tests {
         // regression for the ACP-store fallback.
         for key in [sid.to_string(), format!("rpc_{sid}"), format!("gw_{sid}")] {
             assert!(
-                chat_backend.load(&key).is_empty(),
+                chat_backend.load(&key).expect("load session").is_empty(),
                 "precondition: unified backend has no rows for {key}"
             );
         }
@@ -7978,7 +7997,9 @@ mod tests {
         );
 
         let key = format!("rpc_{sid}");
-        let metadata = chat_backend.list_sessions_with_metadata();
+        let metadata = chat_backend
+            .list_sessions_with_metadata()
+            .expect("list sessions");
         let entry = metadata
             .iter()
             .find(|m| m.key == key)

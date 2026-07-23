@@ -13,6 +13,7 @@ use r2d2_postgres::PostgresConnectionManager;
 use rustls::ClientConfig;
 use tokio_postgres::Row;
 use tokio_postgres_rustls::MakeRustlsConnect;
+use url::Url;
 use zeroclaw_api::model_provider::ChatMessage;
 
 use crate::session_backend::{
@@ -87,10 +88,16 @@ impl PostgresSessionBackend {
             )
         })?;
 
-        // Log TLS mode for audit purposes
-        let url_lower = database_url.to_lowercase();
-        let tls_disabled = url_lower.contains("sslmode=disable")
-            || url_lower.contains("sslmode") && url_lower.contains("disable");
+        // Use proper URL parsing to extract sslmode parameter
+        // This is more robust than string matching and handles various URL formats
+        let tls_disabled = Url::parse(database_url)
+            .ok()
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("sslmode"))
+                    .map(|(_, value)| value.eq_ignore_ascii_case("disable"))
+            })
+            .unwrap_or(false);
 
         if tls_disabled {
             ::zeroclaw_log::record!(

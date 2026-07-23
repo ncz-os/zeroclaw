@@ -12971,49 +12971,8 @@ pub struct ChannelsConfig {
     #[credential_class = "encrypted_secret"]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub postgres_url: Option<String>,
-    /// MySQL connection URL used by the `mysql` session backend
-    /// (`mysql://user:pass@host:port/db`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub mysql_url: Option<String>,
-    /// MariaDB connection URL used by the `mariadb` session backend
-    /// (`mysql://user:pass@host:port/db` with the MariaDB driver).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub mariadb_url: Option<String>,
-    /// Oracle DB username used by the `oracle` session backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub oracle_user: Option<String>,
-    /// Oracle DB password used by the `oracle` session backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub oracle_password: Option<String>,
-    /// Oracle DSN / `EZCONNECT` / TNS string used by the `oracle` session
-    /// backend (e.g. `host:1521/SERVICE`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub oracle_dsn: Option<String>,
-    /// IBM Db2 connection string used by the `db2` session backend
-    /// (e.g. `DATABASE=sample;HOSTNAME=db2.example.com;PORT=50000;UID=zeroclaw;PWD=…`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub db2_conn_str: Option<String>,
-    /// Connection-pool size shared by every remote session backend
-    /// (postgres, mysql, mariadb, oracle, db2). Local backends
-    /// (sqlite, jsonl) ignore this. Defaults to `5`.
+    /// Connection-pool size for the PostgreSQL session backend.
+    /// Local backends (sqlite, jsonl) ignore this. Defaults to `5`.
     #[serde(default = "default_session_pool_size")]
     pub pool_size: u32,
 }
@@ -13436,12 +13395,6 @@ impl Default for ChannelsConfig {
             session_ttl_hours: 0,
             debounce_ms: 0,
             postgres_url: None,
-            mysql_url: None,
-            mariadb_url: None,
-            oracle_user: None,
-            oracle_password: None,
-            oracle_dsn: None,
-            db2_conn_str: None,
             pool_size: default_session_pool_size(),
         }
     }
@@ -24477,12 +24430,6 @@ auto_save = true
                 session_ttl_hours: 0,
                 debounce_ms: 0,
                 postgres_url: None,
-                mysql_url: None,
-                mariadb_url: None,
-                oracle_user: None,
-                oracle_password: None,
-                oracle_dsn: None,
-                db2_conn_str: None,
                 pool_size: default_session_pool_size(),
             },
             memory: MemoryConfig::default(),
@@ -26165,12 +26112,6 @@ allowed_users = ["@u:matrix.org"]
             session_ttl_hours: 0,
             debounce_ms: 0,
             postgres_url: None,
-            mysql_url: None,
-            mariadb_url: None,
-            oracle_user: None,
-            oracle_password: None,
-            oracle_dsn: None,
-            db2_conn_str: None,
             pool_size: default_session_pool_size(),
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
@@ -26695,12 +26636,6 @@ allowed_numbers = ["+1", "+2"]
             session_ttl_hours: 0,
             debounce_ms: 0,
             postgres_url: None,
-            mysql_url: None,
-            mariadb_url: None,
-            oracle_user: None,
-            oracle_password: None,
-            oracle_dsn: None,
-            db2_conn_str: None,
             pool_size: default_session_pool_size(),
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();

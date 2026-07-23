@@ -79,7 +79,7 @@ fn discord_threaded_message_writes_full_routing_columns() {
     );
     orchestrator_session_context_call(&backend, "session_a", &msg);
 
-    let meta = backend.get_session_metadata("session_a").unwrap();
+    let meta = backend.get_session_metadata("session_a").unwrap().unwrap();
     assert_eq!(meta.channel_id.as_deref(), Some("discord.clamps"));
     assert_eq!(meta.room_id.as_deref(), Some("thread-987654"));
     assert_eq!(meta.sender_id.as_deref(), Some("singlerider"));
@@ -95,7 +95,7 @@ fn discord_dm_falls_back_to_reply_target_for_room_id() {
     let msg = msg_from("discord", Some("glados"), None, "dm-channel-555", "user42");
     orchestrator_session_context_call(&backend, "session_b", &msg);
 
-    let meta = backend.get_session_metadata("session_b").unwrap();
+    let meta = backend.get_session_metadata("session_b").unwrap().unwrap();
     assert_eq!(meta.channel_id.as_deref(), Some("discord.glados"));
     assert_eq!(meta.room_id.as_deref(), Some("dm-channel-555"));
     assert_eq!(meta.sender_id.as_deref(), Some("user42"));
@@ -114,7 +114,7 @@ fn single_instance_channel_with_no_alias_skips_channel_id() {
     let msg = msg_from("cli", None, None, "stdin", "shane");
     orchestrator_session_context_call(&backend, "session_c", &msg);
 
-    let meta = backend.get_session_metadata("session_c").unwrap();
+    let meta = backend.get_session_metadata("session_c").unwrap().unwrap();
     assert!(meta.channel_id.is_none(), "no alias -> no channel_id");
     assert_eq!(meta.room_id.as_deref(), Some("stdin"));
     assert_eq!(meta.sender_id.as_deref(), Some("shane"));
@@ -129,7 +129,7 @@ fn empty_sender_is_filtered_to_none() {
     let msg = msg_from("matrix", Some("default"), None, "!room:matrix.org", "");
     orchestrator_session_context_call(&backend, "session_d", &msg);
 
-    let meta = backend.get_session_metadata("session_d").unwrap();
+    let meta = backend.get_session_metadata("session_d").unwrap().unwrap();
     assert_eq!(meta.channel_id.as_deref(), Some("matrix.default"));
     assert_eq!(meta.room_id.as_deref(), Some("!room:matrix.org"));
     assert!(meta.sender_id.is_none(), "empty sender should not persist");

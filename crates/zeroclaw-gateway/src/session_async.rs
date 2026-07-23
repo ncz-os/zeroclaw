@@ -49,7 +49,7 @@ pub async fn load(
     backend: Arc<dyn SessionBackend>,
     session_key: String,
 ) -> io::Result<Vec<zeroclaw_api::model_provider::ChatMessage>> {
-    spawn_blocking_session_op(move || Ok(backend.load(&session_key))).await
+    spawn_blocking_session_op(move || backend.load(&session_key)).await
 }
 
 /// Convenience: load session messages with their persisted timestamps
@@ -58,7 +58,7 @@ pub async fn load_with_timestamps(
     backend: Arc<dyn SessionBackend>,
     session_key: String,
 ) -> io::Result<Vec<zeroclaw_infra::session_backend::TimestampedMessage>> {
-    spawn_blocking_session_op(move || Ok(backend.load_with_timestamps(&session_key))).await
+    spawn_blocking_session_op(move || backend.load_with_timestamps(&session_key)).await
 }
 
 /// Convenience: append a single message off the blocking pool.
@@ -82,7 +82,7 @@ pub async fn delete_session(
 pub async fn list_sessions_with_metadata(
     backend: Arc<dyn SessionBackend>,
 ) -> io::Result<Vec<zeroclaw_infra::session_backend::SessionMetadata>> {
-    spawn_blocking_session_op(move || Ok(backend.list_sessions_with_metadata())).await
+    spawn_blocking_session_op(move || backend.list_sessions_with_metadata()).await
 }
 
 /// Convenience: set session state off the blocking pool.
@@ -129,7 +129,7 @@ pub async fn session_exists(
     backend: Arc<dyn SessionBackend>,
     session_key: String,
 ) -> io::Result<bool> {
-    spawn_blocking_session_op(move || Ok(backend.session_exists(&session_key))).await
+    spawn_blocking_session_op(move || backend.session_exists(&session_key)).await
 }
 
 /// Async equivalent of `ws::persist_conversation_messages`. Runs the
@@ -145,7 +145,23 @@ pub async fn persist_conversation_messages(
     messages: Vec<zeroclaw_providers::ConversationMessage>,
 ) {
     let join_result = tokio::task::spawn_blocking(move || {
-        if !backend.session_exists(&session_key) {
+        // Propagate session_exists errors instead of swallowing them as false.
+        // A backend error here means we cannot safely persist, so we bail out
+        // and log the failure.
+        let exists = match backend.session_exists(&session_key) {
+            Ok(exists) => exists,
+            Err(e) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"session_key": &session_key, "error": format!("{e}")})),
+                    "session_exists check failed; skipping persist"
+                );
+                return;
+            }
+        };
+        if !exists {
             return;
         }
         for message in messages {
@@ -162,7 +178,7 @@ pub async fn persist_conversation_messages(
     if join_result.is_err() {
         ::zeroclaw_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                 .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
             "session persist worker panicked"
         );
