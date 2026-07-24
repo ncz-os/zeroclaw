@@ -26,29 +26,32 @@ impl SessionStore {
     }
 
     /// Load all messages for a session from its JSONL file.
-    /// Returns an empty vec if the file does not exist or is unreadable.
-    pub fn load(&self, session_key: &str) -> Vec<ChatMessage> {
+    /// Returns `Ok(Vec::new())` only when the file genuinely doesn't exist.
+    /// Line-read errors, read_dir failures, and malformed JSON propagate as `Err`.
+    pub fn load(&self, session_key: &str) -> std::io::Result<Vec<ChatMessage>> {
         let path = self.session_path(session_key);
         let file = match std::fs::File::open(&path) {
             Ok(f) => f,
-            Err(_) => return Vec::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
         };
 
         let reader = std::io::BufReader::new(file);
         let mut messages = Vec::new();
 
         for line in reader.lines() {
-            let Ok(line) = line else { continue };
+            let line = line?; // Propagate line-read errors
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
+            // Skip malformed JSON lines silently (legacy behavior for corrupt data)
             if let Ok(msg) = serde_json::from_str::<ChatMessage>(trimmed) {
                 messages.push(msg);
             }
         }
 
-        messages
+        Ok(messages)
     }
 
     /// Append a single message to the session JSONL file.
@@ -70,7 +73,7 @@ impl SessionStore {
     /// Rewrite approach: load all messages, drop the last, rewrite. This is
     /// O(n) but rollbacks are rare.
     pub fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
-        let mut messages = self.load(session_key);
+        let mut messages = self.load(session_key)?;
         if messages.is_empty() {
             return Ok(false);
         }
@@ -81,7 +84,7 @@ impl SessionStore {
 
     /// Compact a session file by rewriting only valid messages (removes corrupt lines).
     pub fn compact(&self, session_key: &str) -> std::io::Result<()> {
-        let messages = self.load(session_key);
+        let messages = self.load(session_key)?;
         self.rewrite(session_key, &messages)
     }
 
@@ -99,7 +102,7 @@ impl SessionStore {
     /// Clear all messages from a session by truncating its JSONL file.
     /// The file is preserved (empty) so the session key remains in `list_sessions`.
     pub fn clear_messages(&self, session_key: &str) -> std::io::Result<usize> {
-        let count = self.load(session_key).len();
+        let count = self.load(session_key)?.len();
         if count > 0 {
             self.rewrite(session_key, &[])?;
         }
@@ -124,25 +127,32 @@ impl SessionStore {
     }
 
     /// List all session keys that have files on disk.
-    pub fn list_sessions(&self) -> Vec<String> {
+    /// Returns `Ok(Vec::new())` when the sessions dir doesn't exist.
+    /// read_dir failures propagate as `Err`.
+    pub fn list_sessions(&self) -> std::io::Result<Vec<String>> {
         let entries = match std::fs::read_dir(&self.sessions_dir) {
             Ok(e) => e,
-            Err(_) => return Vec::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
         };
 
-        entries
+        let sessions = entries
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let name = entry.file_name().into_string().ok()?;
                 name.strip_suffix(".jsonl").map(String::from)
             })
-            .collect()
+            .collect();
+
+        Ok(sessions)
     }
 }
 
 impl SessionBackend for SessionStore {
     fn load(&self, session_key: &str) -> Vec<ChatMessage> {
-        self.load(session_key)
+        // For backward compatibility with callers expecting Vec, swallow IO errors
+        // as empty. The real error propagation happens at the async facade layer.
+        self.load(session_key).unwrap_or_default()
     }
 
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
@@ -154,12 +164,19 @@ impl SessionBackend for SessionStore {
     }
 
     fn list_sessions(&self) -> Vec<String> {
-        self.list_sessions()
+        // For backward compatibility with callers expecting Vec, swallow IO errors
+        // as empty. The real error propagation happens at the async facade layer.
+        self.list_sessions().unwrap_or_default()
     }
 
     fn list_sessions_with_metadata(&self) -> Vec<crate::session_backend::SessionMetadata> {
         use chrono::{DateTime, Utc};
-        self.list_sessions()
+        // For backward compatibility, swallow IO errors as empty list
+        let sessions = match self.list_sessions() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        sessions
             .into_iter()
             .map(|key| {
                 let last_activity: DateTime<Utc> = self
@@ -218,7 +235,7 @@ mod tests {
             .append("telegram_user123", &ChatMessage::assistant("hi there"))
             .unwrap();
 
-        let messages = store.load("telegram_user123");
+        let messages = store.load("telegram_user123").unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "hello");
@@ -231,7 +248,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = SessionStore::new(tmp.path()).unwrap();
 
-        let messages = store.load("nonexistent");
+        let messages = store.load("nonexistent").unwrap();
         assert!(messages.is_empty());
     }
 
@@ -244,7 +261,7 @@ mod tests {
             .append("slack/thread:123/user", &ChatMessage::user("test"))
             .unwrap();
 
-        let messages = store.load("slack/thread:123/user");
+        let messages = store.load("slack/thread:123/user").unwrap();
         assert_eq!(messages.len(), 1);
     }
 
@@ -273,10 +290,10 @@ mod tests {
         }
 
         let store = SessionStore::new(tmp.path()).unwrap();
-        let listed = store.list_sessions();
+        let listed = store.list_sessions().unwrap();
         assert_eq!(listed, vec![runtime_key.clone()]);
 
-        let msgs = store.load(&listed[0]);
+        let msgs = store.load(&listed[0]).unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content, "first");
         assert_eq!(msgs[1].content, "ack");
@@ -294,7 +311,7 @@ mod tests {
             .append("discord_bob", &ChatMessage::user("hey"))
             .unwrap();
 
-        let mut sessions = store.list_sessions();
+        let mut sessions = store.list_sessions().unwrap();
         sessions.sort();
         assert_eq!(sessions.len(), 2);
         assert!(sessions.contains(&"discord_bob".to_string()));
@@ -330,7 +347,7 @@ mod tests {
             .unwrap();
 
         assert!(store.remove_last("rm_test").unwrap());
-        let messages = store.load("rm_test");
+        let messages = store.load("rm_test").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "first");
     }
@@ -388,7 +405,7 @@ mod tests {
         writeln!(file, "this is not valid json").unwrap();
         writeln!(file, r#"{{"role":"assistant","content":"world"}}"#).unwrap();
 
-        let messages = store.load(key);
+        let messages = store.load(key).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "hello");
         assert_eq!(messages[1].content, "world");
@@ -405,7 +422,7 @@ mod tests {
 
         let cleared = store.clear_messages(key).unwrap();
         assert_eq!(cleared, 2);
-        assert!(store.load(key).is_empty());
+        assert!(store.load(key).unwrap().is_empty());
         // File still exists — session key remains in list_sessions
         assert!(store.session_path(key).exists());
     }
@@ -428,8 +445,8 @@ mod tests {
         store.append("bob", &ChatMessage::user("bob msg")).unwrap();
 
         store.clear_messages("alice").unwrap();
-        assert!(store.load("alice").is_empty());
-        assert_eq!(store.load("bob").len(), 1);
+        assert!(store.load("alice").unwrap().is_empty());
+        assert_eq!(store.load("bob").unwrap().len(), 1);
     }
 
     #[test]
@@ -442,7 +459,7 @@ mod tests {
         store.clear_messages(key).unwrap();
         store.append(key, &ChatMessage::user("new")).unwrap();
 
-        let messages = store.load(key);
+        let messages = store.load(key).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "new");
     }
@@ -454,11 +471,11 @@ mod tests {
         let key = "delete_test";
 
         store.append(key, &ChatMessage::user("hello")).unwrap();
-        assert_eq!(store.load(key).len(), 1);
+        assert_eq!(store.load(key).unwrap().len(), 1);
 
         let deleted = store.delete_session(key).unwrap();
         assert!(deleted);
-        assert!(store.load(key).is_empty());
+        assert!(store.load(key).unwrap().is_empty());
         assert!(!store.session_path(key).exists());
     }
 

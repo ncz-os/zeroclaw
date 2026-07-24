@@ -66,7 +66,15 @@ pub struct TimestampedMessage {
 }
 
 /// Trait for session persistence backends.
+///
 /// Implementations must be `Send + Sync` for sharing across async tasks.
+///
+/// ## Multiword Search Contract
+///
+/// The `search` method interprets multiword queries as **OR** combinations:
+/// a query `"foo bar"` returns sessions containing `foo` OR `bar` (not both).
+/// This preserves SQLite FTS5's default behavior so switching backends never
+/// silently narrows results. Later backends MUST match this contract.
 pub trait SessionBackend: Send + Sync {
     /// Load all messages for a session. Returns empty vec if session doesn't exist.
     fn load(&self, session_key: &str) -> Vec<ChatMessage>;

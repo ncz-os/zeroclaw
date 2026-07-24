@@ -228,22 +228,18 @@ impl SqliteSessionBackend {
 impl SessionBackend for SqliteSessionBackend {
     fn load(&self, session_key: &str) -> Vec<ChatMessage> {
         let conn = self.conn.lock();
-        let mut stmt = match conn
+        let mut stmt = conn
             .prepare("SELECT role, content FROM sessions WHERE session_key = ?1 ORDER BY id ASC")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+            .expect("prepare load statement");
 
-        let rows = match stmt.query_map(params![session_key], |row| {
-            Ok(ChatMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
+        let rows = stmt
+            .query_map(params![session_key], |row| {
+                Ok(ChatMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                })
             })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+            .expect("query load");
 
         rows.filter_map(|r| r.ok()).collect()
     }
@@ -254,29 +250,25 @@ impl SessionBackend for SqliteSessionBackend {
     ) -> Vec<crate::session_backend::TimestampedMessage> {
         use crate::session_backend::TimestampedMessage;
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT role, content, created_at FROM sessions WHERE session_key = ?1 ORDER BY id ASC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        ).expect("prepare load_with_timestamps statement");
 
-        let rows = match stmt.query_map(params![session_key], |row| {
-            let role: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let created_at_raw: Option<String> = row.get(2).ok();
-            let created_at = created_at_raw
-                .as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc));
-            Ok(TimestampedMessage {
-                message: ChatMessage { role, content },
-                created_at,
+        let rows = stmt
+            .query_map(params![session_key], |row| {
+                let role: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let created_at_raw: Option<String> = row.get(2).ok();
+                let created_at = created_at_raw
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+                Ok(TimestampedMessage {
+                    message: ChatMessage { role, content },
+                    created_at,
+                })
             })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+            .expect("query load_with_timestamps");
 
         rows.filter_map(|r| r.ok()).collect()
     }
@@ -375,65 +367,57 @@ impl SessionBackend for SqliteSessionBackend {
 
     fn list_sessions(&self) -> Vec<String> {
         let conn = self.conn.lock();
-        let mut stmt = match conn
+        let mut stmt = conn
             .prepare("SELECT session_key FROM session_metadata ORDER BY last_activity DESC")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+            .expect("prepare list_sessions statement");
 
-        let rows = match stmt.query_map([], |row| row.get(0)) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .expect("query list_sessions");
 
         rows.filter_map(|r| r.ok()).collect()
     }
 
     fn list_sessions_with_metadata(&self) -> Vec<SessionMetadata> {
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT session_key, created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id
              FROM session_metadata ORDER BY last_activity DESC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        ).expect("prepare list_sessions_with_metadata statement");
 
-        let rows = match stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let created_str: String = row.get(1)?;
-            let activity_str: String = row.get(2)?;
-            let count: i64 = row.get(3)?;
-            let name: Option<String> = row.get(4)?;
-            let agent_alias: Option<String> = row.get(5)?;
-            let channel_id: Option<String> = row.get(6)?;
-            let room_id: Option<String> = row.get(7)?;
-            let sender_id: Option<String> = row.get(8)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let key: String = row.get(0)?;
+                let created_str: String = row.get(1)?;
+                let activity_str: String = row.get(2)?;
+                let count: i64 = row.get(3)?;
+                let name: Option<String> = row.get(4)?;
+                let agent_alias: Option<String> = row.get(5)?;
+                let channel_id: Option<String> = row.get(6)?;
+                let room_id: Option<String> = row.get(7)?;
+                let sender_id: Option<String> = row.get(8)?;
 
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            let activity = DateTime::parse_from_rfc3339(&activity_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
+                let created = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let activity = DateTime::parse_from_rfc3339(&activity_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
 
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            Ok(SessionMetadata {
-                key,
-                name,
-                created_at: created,
-                last_activity: activity,
-                message_count: count as usize,
-                agent_alias,
-                channel_id,
-                room_id,
-                sender_id,
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                Ok(SessionMetadata {
+                    key,
+                    name,
+                    created_at: created,
+                    last_activity: activity,
+                    message_count: count as usize,
+                    agent_alias,
+                    channel_id,
+                    room_id,
+                    sender_id,
+                })
             })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+            .expect("query list_sessions_with_metadata");
 
         rows.filter_map(|r| r.ok()).collect()
     }
@@ -680,46 +664,42 @@ impl SessionBackend for SqliteSessionBackend {
 
     fn list_running_sessions(&self) -> Vec<SessionMetadata> {
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT session_key, created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id
              FROM session_metadata WHERE state = 'running' ORDER BY turn_started_at DESC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        ).expect("prepare list_running_sessions statement");
 
-        let rows = match stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let created_str: String = row.get(1)?;
-            let activity_str: String = row.get(2)?;
-            let count: i64 = row.get(3)?;
-            let name: Option<String> = row.get(4)?;
-            let agent_alias: Option<String> = row.get(5)?;
-            let channel_id: Option<String> = row.get(6)?;
-            let room_id: Option<String> = row.get(7)?;
-            let sender_id: Option<String> = row.get(8)?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            let activity = DateTime::parse_from_rfc3339(&activity_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            Ok(SessionMetadata {
-                key,
-                name,
-                created_at: created,
-                last_activity: activity,
-                message_count: count as usize,
-                agent_alias,
-                channel_id,
-                room_id,
-                sender_id,
+        let rows = stmt
+            .query_map([], |row| {
+                let key: String = row.get(0)?;
+                let created_str: String = row.get(1)?;
+                let activity_str: String = row.get(2)?;
+                let count: i64 = row.get(3)?;
+                let name: Option<String> = row.get(4)?;
+                let agent_alias: Option<String> = row.get(5)?;
+                let channel_id: Option<String> = row.get(6)?;
+                let room_id: Option<String> = row.get(7)?;
+                let sender_id: Option<String> = row.get(8)?;
+                let created = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let activity = DateTime::parse_from_rfc3339(&activity_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                Ok(SessionMetadata {
+                    key,
+                    name,
+                    created_at: created,
+                    last_activity: activity,
+                    message_count: count as usize,
+                    agent_alias,
+                    channel_id,
+                    room_id,
+                    sender_id,
+                })
             })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+            .expect("query list_running_sessions");
 
         rows.filter_map(|r| r.ok()).collect()
     }
@@ -728,48 +708,44 @@ impl SessionBackend for SqliteSessionBackend {
         let conn = self.conn.lock();
         #[allow(clippy::cast_possible_wrap)]
         let cutoff = (Utc::now() - chrono::Duration::seconds(threshold_secs as i64)).to_rfc3339();
-        let mut stmt = match conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT session_key, created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id
              FROM session_metadata
              WHERE state = 'running' AND turn_started_at < ?1
              ORDER BY turn_started_at ASC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        ).expect("prepare list_stuck_sessions statement");
 
-        let rows = match stmt.query_map(params![cutoff], |row| {
-            let key: String = row.get(0)?;
-            let created_str: String = row.get(1)?;
-            let activity_str: String = row.get(2)?;
-            let count: i64 = row.get(3)?;
-            let name: Option<String> = row.get(4)?;
-            let agent_alias: Option<String> = row.get(5)?;
-            let channel_id: Option<String> = row.get(6)?;
-            let room_id: Option<String> = row.get(7)?;
-            let sender_id: Option<String> = row.get(8)?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            let activity = DateTime::parse_from_rfc3339(&activity_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            Ok(SessionMetadata {
-                key,
-                name,
-                created_at: created,
-                last_activity: activity,
-                message_count: count as usize,
-                agent_alias,
-                channel_id,
-                room_id,
-                sender_id,
+        let rows = stmt
+            .query_map(params![cutoff], |row| {
+                let key: String = row.get(0)?;
+                let created_str: String = row.get(1)?;
+                let activity_str: String = row.get(2)?;
+                let count: i64 = row.get(3)?;
+                let name: Option<String> = row.get(4)?;
+                let agent_alias: Option<String> = row.get(5)?;
+                let channel_id: Option<String> = row.get(6)?;
+                let room_id: Option<String> = row.get(7)?;
+                let sender_id: Option<String> = row.get(8)?;
+                let created = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let activity = DateTime::parse_from_rfc3339(&activity_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                Ok(SessionMetadata {
+                    key,
+                    name,
+                    created_at: created,
+                    last_activity: activity,
+                    message_count: count as usize,
+                    agent_alias,
+                    channel_id,
+                    room_id,
+                    sender_id,
+                })
             })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+            .expect("query list_stuck_sessions");
 
         rows.filter_map(|r| r.ok()).collect()
     }
@@ -784,15 +760,14 @@ impl SessionBackend for SqliteSessionBackend {
         let limit = query.limit.unwrap_or(50) as i64;
 
         // FTS5 search
-        let mut stmt = match conn.prepare(
-            "SELECT DISTINCT f.session_key
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT f.session_key
              FROM sessions_fts f
              WHERE sessions_fts MATCH ?1
              LIMIT ?2",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+            )
+            .expect("prepare search statement");
 
         // Quote each word for FTS5
         let fts_query: String = keyword
@@ -801,10 +776,11 @@ impl SessionBackend for SqliteSessionBackend {
             .collect::<Vec<_>>()
             .join(" OR ");
 
-        let keys: Vec<String> = match stmt.query_map(params![fts_query, limit], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => return Vec::new(),
-        };
+        let keys: Vec<String> = stmt
+            .query_map(params![fts_query, limit], |row| row.get(0))
+            .expect("query search")
+            .filter_map(|r| r.ok())
+            .collect();
 
         // Look up metadata for matched sessions
         keys.iter()
