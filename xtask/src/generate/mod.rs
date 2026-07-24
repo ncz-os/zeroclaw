@@ -178,7 +178,9 @@ pub fn run(targets: &[String], check: bool) -> anyhow::Result<()> {
     }
 
     if check && drift {
-        anyhow::bail!("one or more installers drifted; run `cargo generate installers`");
+        return Err(anyhow::Error::msg(
+            "one or more installers drifted; run `cargo generate installers`",
+        ));
     }
     Ok(())
 }
