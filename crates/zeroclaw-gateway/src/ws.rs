@@ -342,18 +342,53 @@ async fn handle_socket(
     let mut effective_name: Option<String> = None;
     let mut stored_messages = Vec::new();
     if let Some(ref backend) = state.session_backend {
-        let messages = backend.load(&session_key);
-        if !messages.is_empty() {
-            message_count = messages.len();
-            stored_messages = messages;
-            resumed = true;
+        // Per F2: backend read errors must be logged and handled explicitly,
+        // not treated as "no history".
+        match backend.load(&session_key) {
+            Ok(messages) => {
+                if !messages.is_empty() {
+                    message_count = messages.len();
+                    stored_messages = messages;
+                    resumed = true;
+                }
+            }
+            Err(e) => {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_attrs(::serde_json::json!({
+                            "session_key": &session_key,
+                            "error": format!("{e:#}"),
+                        })),
+                    "Failed to load session history from backend"
+                );
+                // Send error to client and close connection
+                let err = serde_json::json!({
+                    "type": "error",
+                    "message": "Failed to load session history",
+                    "code": "SESSION_LOAD_FAILED"
+                });
+                let _ = sender.send(Message::Text(err.to_string().into())).await;
+                return;
+            }
         }
         // Set session name if provided (non-empty) on connect
         if let Some(ref name) = session_name
             && !name.is_empty()
         {
-            let _ = backend.set_session_name(&session_key, name);
-            effective_name = Some(name.clone());
+            if let Err(e) = backend.set_session_name(&session_key, name) {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_attrs(::serde_json::json!({
+                            "session_key": &session_key,
+                            "error": format!("{e:#}"),
+                        })),
+                    "Failed to set session name"
+                );
+            } else {
+                effective_name = Some(name.clone());
+            }
         }
         // If no name was provided via query param, load the stored name
         if effective_name.is_none() {
@@ -361,7 +396,18 @@ async fn handle_socket(
         }
         // Stamp the agent alias so future /api/sessions queries and
         // per-agent filters can attribute this session to its agent.
-        let _ = backend.set_session_agent_alias(&session_key, &agent_alias);
+        if let Err(e) = backend.set_session_agent_alias(&session_key, &agent_alias) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(::serde_json::json!({
+                        "session_key": &session_key,
+                        "agent_alias": &agent_alias,
+                        "error": format!("{e:#}"),
+                    })),
+                "Failed to set session agent alias"
+            );
+        }
     }
 
     // Send session_start message to client
@@ -832,7 +878,10 @@ fn persist_conversation_messages(
     // the post-turn persistence, don't resurrect it. The `aborted` / `done`
     // / `error` frames are still sent to the client; we just refuse to
     // re-create the row that `DELETE /api/sessions/{id}` just wiped.
-    if !backend.session_exists(session_key) {
+    if !backend
+        .session_exists(session_key)
+        .expect("session_exists should succeed")
+    {
         return;
     }
     for message in messages {
@@ -1224,7 +1273,9 @@ async fn process_chat_message(
 
     if was_cancelled {
         if let Some(ref backend) = state.session_backend {
-            let still_exists = backend.session_exists(session_key);
+            let still_exists = backend
+                .session_exists(session_key)
+                .expect("session_exists should succeed");
             if still_exists {
                 match &result {
                     Err(error) if !error.new_messages.is_empty() => {
@@ -1248,7 +1299,10 @@ async fn process_chat_message(
                             // delete the session between the outer check and
                             // here; `persist_conversation_messages` already
                             // re-checks internally.
-                            if backend.session_exists(session_key) {
+                            if backend
+                                .session_exists(session_key)
+                                .expect("session_exists should succeed")
+                            {
                                 let _ = backend.append(session_key, &assistant_msg);
                             }
                         }
@@ -1263,7 +1317,10 @@ async fn process_chat_message(
                             format!("{accumulated_text}\n\n{marker}")
                         };
                         let assistant_msg = zeroclaw_providers::ChatMessage::assistant(&truncated);
-                        if backend.session_exists(session_key) {
+                        if backend
+                            .session_exists(session_key)
+                            .expect("session_exists should succeed")
+                        {
                             let _ = backend.append(session_key, &assistant_msg);
                         }
                     }
@@ -1276,7 +1333,9 @@ async fn process_chat_message(
         let _ = sender.send(Message::Text(aborted.to_string().into())).await;
 
         if let Some(ref backend) = state.session_backend
-            && backend.session_exists(session_key)
+            && backend
+                .session_exists(session_key)
+                .expect("session_exists should succeed")
         {
             let _ = backend.set_session_state(session_key, "idle", None);
         }
@@ -1970,8 +2029,11 @@ mod tests {
     }
 
     impl zeroclaw_infra::session_backend::SessionBackend for DeletedSessionBackend {
-        fn load(&self, _session_key: &str) -> Vec<zeroclaw_providers::ChatMessage> {
-            Vec::new()
+        fn load(
+            &self,
+            _session_key: &str,
+        ) -> std::io::Result<Vec<zeroclaw_providers::ChatMessage>> {
+            Ok(Vec::new())
         }
         fn append(
             &self,
@@ -1987,12 +2049,12 @@ mod tests {
         fn remove_last(&self, _session_key: &str) -> std::io::Result<bool> {
             Ok(false)
         }
-        fn list_sessions(&self) -> Vec<String> {
-            Vec::new()
+        fn list_sessions(&self) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
         }
-        fn session_exists(&self, _session_key: &str) -> bool {
+        fn session_exists(&self, _session_key: &str) -> std::io::Result<bool> {
             // The user deleted the session between cancel and append.
-            false
+            Ok(false)
         }
     }
 

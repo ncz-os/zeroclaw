@@ -6,7 +6,7 @@ use crate::session_backend::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
 
@@ -226,11 +226,11 @@ impl SqliteSessionBackend {
 }
 
 impl SessionBackend for SqliteSessionBackend {
-    fn load(&self, session_key: &str) -> Vec<ChatMessage> {
+    fn load(&self, session_key: &str) -> std::io::Result<Vec<ChatMessage>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare("SELECT role, content FROM sessions WHERE session_key = ?1 ORDER BY id ASC")
-            .expect("prepare load statement");
+            .map_err(std::io::Error::other)?;
 
         let rows = stmt
             .query_map(params![session_key], |row| {
@@ -239,26 +239,30 @@ impl SessionBackend for SqliteSessionBackend {
                     content: row.get(1)?,
                 })
             })
-            .expect("query load");
+            .map_err(std::io::Error::other)?;
 
-        rows.filter_map(|r| r.ok()).collect()
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(std::io::Error::other)?);
+        }
+        Ok(messages)
     }
 
     fn load_with_timestamps(
         &self,
         session_key: &str,
-    ) -> Vec<crate::session_backend::TimestampedMessage> {
+    ) -> std::io::Result<Vec<crate::session_backend::TimestampedMessage>> {
         use crate::session_backend::TimestampedMessage;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT role, content, created_at FROM sessions WHERE session_key = ?1 ORDER BY id ASC",
-        ).expect("prepare load_with_timestamps statement");
+        ).map_err(std::io::Error::other)?;
 
         let rows = stmt
             .query_map(params![session_key], |row| {
                 let role: String = row.get(0)?;
                 let content: String = row.get(1)?;
-                let created_at_raw: Option<String> = row.get(2).ok();
+                let created_at_raw: Option<String> = row.get(2).optional()?;
                 let created_at = created_at_raw
                     .as_deref()
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -268,9 +272,13 @@ impl SessionBackend for SqliteSessionBackend {
                     created_at,
                 })
             })
-            .expect("query load_with_timestamps");
+            .map_err(std::io::Error::other)?;
 
-        rows.filter_map(|r| r.ok()).collect()
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(std::io::Error::other)?);
+        }
+        Ok(messages)
     }
 
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
@@ -365,25 +373,29 @@ impl SessionBackend for SqliteSessionBackend {
         Ok(true)
     }
 
-    fn list_sessions(&self) -> Vec<String> {
+    fn list_sessions(&self) -> std::io::Result<Vec<String>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare("SELECT session_key FROM session_metadata ORDER BY last_activity DESC")
-            .expect("prepare list_sessions statement");
+            .map_err(std::io::Error::other)?;
 
         let rows = stmt
             .query_map([], |row| row.get(0))
-            .expect("query list_sessions");
+            .map_err(std::io::Error::other)?;
 
-        rows.filter_map(|r| r.ok()).collect()
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row.map_err(std::io::Error::other)?);
+        }
+        Ok(sessions)
     }
 
-    fn list_sessions_with_metadata(&self) -> Vec<SessionMetadata> {
+    fn list_sessions_with_metadata(&self) -> std::io::Result<Vec<SessionMetadata>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT session_key, created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id
              FROM session_metadata ORDER BY last_activity DESC",
-        ).expect("prepare list_sessions_with_metadata statement");
+        ).map_err(std::io::Error::other)?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -417,9 +429,13 @@ impl SessionBackend for SqliteSessionBackend {
                     sender_id,
                 })
             })
-            .expect("query list_sessions_with_metadata");
+            .map_err(std::io::Error::other)?;
 
-        rows.filter_map(|r| r.ok()).collect()
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row.map_err(std::io::Error::other)?);
+        }
+        Ok(sessions)
     }
 
     fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
@@ -545,14 +561,18 @@ impl SessionBackend for SqliteSessionBackend {
         Ok(count.max(0) as usize)
     }
 
-    fn session_exists(&self, session_key: &str) -> bool {
+    fn session_exists(&self, session_key: &str) -> std::io::Result<bool> {
         let conn = self.conn.lock();
         conn.query_row(
             "SELECT 1 FROM session_metadata WHERE session_key = ?1 LIMIT 1",
             params![session_key],
             |_| Ok(()),
         )
-        .is_ok()
+        .map(|_| true)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(std::io::Error::other(other)),
+        })
     }
 
     fn set_session_name(&self, session_key: &str, name: &str) -> std::io::Result<()> {
@@ -576,7 +596,7 @@ impl SessionBackend for SqliteSessionBackend {
         .map_err(std::io::Error::other)
     }
 
-    fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
+    fn get_session_metadata(&self, session_key: &str) -> std::io::Result<Option<SessionMetadata>> {
         let conn = self.conn.lock();
         conn.query_row(
             "SELECT session_key, created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id
@@ -614,7 +634,11 @@ impl SessionBackend for SqliteSessionBackend {
                 })
             },
         )
-        .ok()
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(std::io::Error::other(other)),
+        })
     }
 
     fn set_session_state(
@@ -667,12 +691,12 @@ impl SessionBackend for SqliteSessionBackend {
         })
     }
 
-    fn list_running_sessions(&self) -> Vec<SessionMetadata> {
+    fn list_running_sessions(&self) -> std::io::Result<Vec<SessionMetadata>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT session_key, created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id
              FROM session_metadata WHERE state = 'running' ORDER BY turn_started_at DESC",
-        ).expect("prepare list_running_sessions statement");
+        ).map_err(std::io::Error::other)?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -704,12 +728,16 @@ impl SessionBackend for SqliteSessionBackend {
                     sender_id,
                 })
             })
-            .expect("query list_running_sessions");
+            .map_err(std::io::Error::other)?;
 
-        rows.filter_map(|r| r.ok()).collect()
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row.map_err(std::io::Error::other)?);
+        }
+        Ok(sessions)
     }
 
-    fn list_stuck_sessions(&self, threshold_secs: u64) -> Vec<SessionMetadata> {
+    fn list_stuck_sessions(&self, threshold_secs: u64) -> std::io::Result<Vec<SessionMetadata>> {
         let conn = self.conn.lock();
         #[allow(clippy::cast_possible_wrap)]
         let cutoff = (Utc::now() - chrono::Duration::seconds(threshold_secs as i64)).to_rfc3339();
@@ -718,7 +746,7 @@ impl SessionBackend for SqliteSessionBackend {
              FROM session_metadata
              WHERE state = 'running' AND turn_started_at < ?1
              ORDER BY turn_started_at ASC",
-        ).expect("prepare list_stuck_sessions statement");
+        ).map_err(std::io::Error::other)?;
 
         let rows = stmt
             .query_map(params![cutoff], |row| {
@@ -750,15 +778,25 @@ impl SessionBackend for SqliteSessionBackend {
                     sender_id,
                 })
             })
-            .expect("query list_stuck_sessions");
+            .map_err(std::io::Error::other)?;
 
-        rows.filter_map(|r| r.ok()).collect()
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row.map_err(std::io::Error::other)?);
+        }
+        Ok(sessions)
     }
 
-    fn search(&self, query: &SessionQuery) -> Vec<SessionMetadata> {
+    fn search(&self, query: &SessionQuery) -> std::io::Result<Vec<SessionMetadata>> {
         let Some(keyword) = &query.keyword else {
             return self.list_sessions_with_metadata();
         };
+
+        // Handle empty or whitespace-only keywords
+        let trimmed = keyword.trim();
+        if trimmed.is_empty() {
+            return self.list_sessions_with_metadata();
+        }
 
         let conn = self.conn.lock();
         #[allow(clippy::cast_possible_wrap)]
@@ -768,61 +806,74 @@ impl SessionBackend for SqliteSessionBackend {
         let mut stmt = conn
             .prepare(
                 "SELECT DISTINCT f.session_key
-             FROM sessions_fts f
-             WHERE sessions_fts MATCH ?1
-             LIMIT ?2",
+                 FROM sessions_fts f
+                 WHERE sessions_fts MATCH ?1
+                 LIMIT ?2",
             )
-            .expect("prepare search statement");
+            .map_err(std::io::Error::other)?;
 
-        // Quote each word for FTS5
-        let fts_query: String = keyword
+        // Sanitize and quote each word for FTS5 (OR semantics per multiword search contract)
+        // FTS5 special characters that need escaping: ( ) " { } [ ] ! @ % ^ & * ; : < > , . ? /
+        // We escape double quotes by doubling them (FTS5 standard)
+        let fts_query: String = trimmed
             .split_whitespace()
-            .map(|w| format!("\"{w}\""))
+            .map(|w| {
+                // Escape double quotes by doubling them
+                let escaped = w.replace('\"', "\"\"");
+                format!("\"{escaped}\"")
+            })
             .collect::<Vec<_>>()
             .join(" OR ");
 
-        let keys: Vec<String> = stmt
-            .query_map(params![fts_query, limit], |row| row.get(0))
-            .expect("query search")
-            .filter_map(|r| r.ok())
-            .collect();
+        // Guard against empty query after splitting (shouldn't happen with trim check above)
+        if fts_query.is_empty() {
+            return self.list_sessions_with_metadata();
+        }
 
-        // Look up metadata for matched sessions
-        keys.iter()
-            .filter_map(|key| {
-                conn.query_row(
-                    "SELECT created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id FROM session_metadata WHERE session_key = ?1",
-                    params![key],
-                    |row| {
-                        let created_str: String = row.get(0)?;
-                        let activity_str: String = row.get(1)?;
-                        let count: i64 = row.get(2)?;
-                        let name: Option<String> = row.get(3)?;
-                        let agent_alias: Option<String> = row.get(4)?;
-                        let channel_id: Option<String> = row.get(5)?;
-                        let room_id: Option<String> = row.get(6)?;
-                        let sender_id: Option<String> = row.get(7)?;
-                        Ok(SessionMetadata {
-                            key: key.clone(),
-                            name,
-                            created_at: DateTime::parse_from_rfc3339(&created_str)
-                                .map(|dt| dt.with_timezone(&Utc))
-                                .unwrap_or_else(|_| Utc::now()),
-                            last_activity: DateTime::parse_from_rfc3339(&activity_str)
-                                .map(|dt| dt.with_timezone(&Utc))
-                                .unwrap_or_else(|_| Utc::now()),
-                            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-                            message_count: count as usize,
-                            agent_alias,
-                            channel_id,
-                            room_id,
-                            sender_id,
-                        })
-                    },
-                )
-                .ok()
-            })
-            .collect()
+        let rows = stmt
+            .query_map(params![fts_query, limit], |row| row.get(0))
+            .map_err(std::io::Error::other)?;
+
+        let mut keys: Vec<String> = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(std::io::Error::other)?);
+        }
+
+        let mut results = Vec::new();
+        for key in keys {
+            let meta = conn.query_row(
+                "SELECT created_at, last_activity, message_count, name, agent_alias, channel_id, room_id, sender_id FROM session_metadata WHERE session_key = ?1",
+                params![&key.clone()],
+                |row| {
+                    let created_str: String = row.get(0)?;
+                    let activity_str: String = row.get(1)?;
+                    let count: i64 = row.get(2)?;
+                    let name: Option<String> = row.get(3)?;
+                    let agent_alias: Option<String> = row.get(4)?;
+                    let channel_id: Option<String> = row.get(5)?;
+                    let room_id: Option<String> = row.get(6)?;
+                    let sender_id: Option<String> = row.get(7)?;
+                    Ok(SessionMetadata {
+                        key,
+                        name,
+                        created_at: DateTime::parse_from_rfc3339(&created_str)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now()),
+                        last_activity: DateTime::parse_from_rfc3339(&activity_str)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now()),
+                        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                        message_count: count as usize,
+                        agent_alias,
+                        channel_id,
+                        room_id,
+                        sender_id,
+                    })
+                },
+            ).map_err(std::io::Error::other)?;
+            results.push(meta);
+        }
+        Ok(results)
     }
 
     fn set_session_agent_alias(&self, session_key: &str, agent_alias: &str) -> std::io::Result<()> {
@@ -901,7 +952,7 @@ mod tests {
             .append("user1", &ChatMessage::assistant("hi"))
             .unwrap();
 
-        let msgs = backend.load("user1");
+        let msgs = backend.load("user1").unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[1].role, "assistant");
@@ -916,7 +967,7 @@ mod tests {
         backend.append("u", &ChatMessage::user("b")).unwrap();
 
         assert!(backend.remove_last("u").unwrap());
-        let msgs = backend.load("u");
+        let msgs = backend.load("u").unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "a");
     }
@@ -936,7 +987,7 @@ mod tests {
         backend.append("a", &ChatMessage::user("hi")).unwrap();
         backend.append("b", &ChatMessage::user("hey")).unwrap();
 
-        let sessions = backend.list_sessions();
+        let sessions = backend.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
     }
 
@@ -949,7 +1000,7 @@ mod tests {
         backend.append("s1", &ChatMessage::user("b")).unwrap();
         backend.append("s1", &ChatMessage::user("c")).unwrap();
 
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].message_count, 3);
     }
@@ -969,10 +1020,12 @@ mod tests {
             .append("weather", &ChatMessage::user("What's the weather today?"))
             .unwrap();
 
-        let results = backend.search(&SessionQuery {
-            keyword: Some("Rust".into()),
-            limit: Some(10),
-        });
+        let results = backend
+            .search(&SessionQuery {
+                keyword: Some("Rust".into()),
+                limit: Some(10),
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "code_chat");
     }
@@ -987,10 +1040,12 @@ mod tests {
             .unwrap();
 
         // Verify initial content is searchable
-        let results = backend.search(&SessionQuery {
-            keyword: Some("hello".into()),
-            limit: Some(10),
-        });
+        let results = backend
+            .search(&SessionQuery {
+                keyword: Some("hello".into()),
+                limit: Some(10),
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "chat");
 
@@ -1005,17 +1060,21 @@ mod tests {
         }
 
         // Old keyword should no longer match
-        let results = backend.search(&SessionQuery {
-            keyword: Some("hello".into()),
-            limit: Some(10),
-        });
+        let results = backend
+            .search(&SessionQuery {
+                keyword: Some("hello".into()),
+                limit: Some(10),
+            })
+            .unwrap();
         assert!(results.is_empty());
 
         // New keyword should match after UPDATE trigger syncs FTS index
-        let results = backend.search(&SessionQuery {
-            keyword: Some("goodbye".into()),
-            limit: Some(10),
-        });
+        let results = backend
+            .search(&SessionQuery {
+                keyword: Some("goodbye".into()),
+                limit: Some(10),
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "chat");
     }
@@ -1046,7 +1105,7 @@ mod tests {
         let cleaned = backend.cleanup_stale(48).unwrap(); // 48h TTL
         assert_eq!(cleaned, 1);
 
-        let sessions = backend.list_sessions();
+        let sessions = backend.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0], "new_session");
     }
@@ -1062,9 +1121,9 @@ mod tests {
 
         let cleared = backend.clear_messages("s1").unwrap();
         assert_eq!(cleared, 2);
-        assert!(backend.load("s1").is_empty());
+        assert!(backend.load("s1").unwrap().is_empty());
         // Session still exists in metadata with name preserved
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].message_count, 0);
         assert_eq!(meta[0].name.as_deref(), Some("My Session"));
@@ -1086,8 +1145,8 @@ mod tests {
         backend.append("s2", &ChatMessage::user("world")).unwrap();
 
         backend.clear_messages("s1").unwrap();
-        assert!(backend.load("s1").is_empty());
-        assert_eq!(backend.load("s2").len(), 1);
+        assert!(backend.load("s1").unwrap().is_empty());
+        assert_eq!(backend.load("s2").unwrap().len(), 1);
     }
 
     #[test]
@@ -1099,11 +1158,11 @@ mod tests {
         backend.clear_messages("s1").unwrap();
         backend.append("s1", &ChatMessage::user("new")).unwrap();
 
-        let messages = backend.load("s1");
+        let messages = backend.load("s1").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "new");
         // Metadata count should reflect the new message
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert_eq!(meta[0].message_count, 1);
     }
 
@@ -1117,9 +1176,9 @@ mod tests {
         backend.append("s2", &ChatMessage::user("other")).unwrap();
 
         assert!(backend.delete_session("s1").unwrap());
-        assert!(backend.load("s1").is_empty());
-        assert_eq!(backend.list_sessions().len(), 1);
-        assert_eq!(backend.list_sessions()[0], "s2");
+        assert!(backend.load("s1").unwrap().is_empty());
+        assert_eq!(backend.list_sessions().unwrap().len(), 1);
+        assert_eq!(backend.list_sessions().unwrap()[0], "s2");
     }
 
     #[test]
@@ -1134,15 +1193,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
 
-        assert!(!backend.session_exists("ghost"));
+        assert!(!backend.session_exists("ghost").unwrap());
 
         backend
             .append("ghost", &ChatMessage::user("first"))
             .unwrap();
-        assert!(backend.session_exists("ghost"));
+        assert!(backend.session_exists("ghost").unwrap());
 
         assert!(backend.delete_session("ghost").unwrap());
-        assert!(!backend.session_exists("ghost"));
+        assert!(!backend.session_exists("ghost").unwrap());
     }
 
     #[test]
@@ -1168,7 +1227,7 @@ mod tests {
         assert!(sessions_dir.join("test_user.jsonl.migrated").exists());
 
         // Messages should be in SQLite
-        let msgs = backend.load("test_user");
+        let msgs = backend.load("test_user").unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content, "hello");
     }
@@ -1181,7 +1240,7 @@ mod tests {
         backend.append("s1", &ChatMessage::user("hello")).unwrap();
         backend.set_session_name("s1", "My Session").unwrap();
 
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].name.as_deref(), Some("My Session"));
     }
@@ -1195,7 +1254,7 @@ mod tests {
         backend.set_session_name("s1", "First").unwrap();
         backend.set_session_name("s1", "Second").unwrap();
 
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert_eq!(meta[0].name.as_deref(), Some("Second"));
     }
 
@@ -1206,7 +1265,7 @@ mod tests {
 
         backend.append("s1", &ChatMessage::user("hello")).unwrap();
 
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert_eq!(meta.len(), 1);
         assert!(meta[0].name.is_none());
     }
@@ -1280,7 +1339,7 @@ mod tests {
             .unwrap();
         // s3 stays idle (default)
 
-        let running = backend.list_running_sessions();
+        let running = backend.list_running_sessions().unwrap();
         assert_eq!(running.len(), 2);
         let keys: Vec<&str> = running.iter().map(|m| m.key.as_str()).collect();
         assert!(keys.contains(&"s1"));
@@ -1303,12 +1362,12 @@ mod tests {
             ).unwrap();
         }
 
-        let stuck = backend.list_stuck_sessions(300); // 5 min threshold
+        let stuck = backend.list_stuck_sessions(300).unwrap(); // 5 min threshold
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0].key, "s1");
 
         // Not stuck if threshold is longer
-        let not_stuck = backend.list_stuck_sessions(900); // 15 min threshold
+        let not_stuck = backend.list_stuck_sessions(900).unwrap(); // 15 min threshold
         assert_eq!(not_stuck.len(), 0);
     }
 
@@ -1330,7 +1389,7 @@ mod tests {
         // Re-open (migration should be idempotent)
         drop(backend);
         let backend2 = SqliteSessionBackend::new(tmp.path()).unwrap();
-        let msgs = backend2.load("s1");
+        let msgs = backend2.load("s1").unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "hello");
 
@@ -1348,7 +1407,7 @@ mod tests {
         backend.set_session_name("s1", "Named").unwrap();
         backend.set_session_name("s1", "").unwrap();
 
-        let meta = backend.list_sessions_with_metadata();
+        let meta = backend.list_sessions_with_metadata().unwrap();
         assert!(meta[0].name.is_none());
     }
 
@@ -1363,7 +1422,7 @@ mod tests {
         backend.append("s1", &ChatMessage::assistant("hi")).unwrap();
         backend.set_session_name("s1", "My Chat").unwrap();
 
-        let meta = backend.get_session_metadata("s1").unwrap();
+        let meta = backend.get_session_metadata("s1").unwrap().unwrap();
         assert_eq!(meta.key, "s1");
         assert_eq!(meta.name.as_deref(), Some("My Chat"));
         assert_eq!(meta.message_count, 2);
@@ -1373,7 +1432,12 @@ mod tests {
     fn get_session_metadata_returns_none_for_missing() {
         let tmp = TempDir::new().unwrap();
         let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
-        assert!(backend.get_session_metadata("nonexistent").is_none());
+        assert!(
+            backend
+                .get_session_metadata("nonexistent")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1384,10 +1448,10 @@ mod tests {
         backend.append("s1", &ChatMessage::user("hello")).unwrap();
         backend.set_session_agent_alias("s1", "scout").unwrap();
 
-        let meta = backend.get_session_metadata("s1").unwrap();
+        let meta = backend.get_session_metadata("s1").unwrap().unwrap();
         assert_eq!(meta.agent_alias.as_deref(), Some("scout"));
 
-        let listed = backend.list_sessions_with_metadata();
+        let listed = backend.list_sessions_with_metadata().unwrap();
         let row = listed.iter().find(|m| m.key == "s1").unwrap();
         assert_eq!(row.agent_alias.as_deref(), Some("scout"));
 
@@ -1453,7 +1517,7 @@ mod tests {
             )
             .unwrap();
 
-        let meta = backend.get_session_metadata("s1").unwrap();
+        let meta = backend.get_session_metadata("s1").unwrap().unwrap();
         assert_eq!(meta.channel_id.as_deref(), Some("discord.clamps"));
         assert_eq!(meta.room_id.as_deref(), Some("1234567890"));
         assert_eq!(meta.sender_id.as_deref(), Some("@user:matrix"));
@@ -1470,7 +1534,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let meta = backend.get_session_metadata("s1").unwrap();
+        let meta = backend.get_session_metadata("s1").unwrap().unwrap();
         assert_eq!(meta.channel_id.as_deref(), Some("discord.clamps"));
         assert_eq!(meta.sender_id.as_deref(), Some("@user:matrix"));
     }
@@ -1491,7 +1555,7 @@ mod tests {
             )
             .unwrap();
 
-        let meta = backend.get_session_metadata("s1").unwrap();
+        let meta = backend.get_session_metadata("s1").unwrap().unwrap();
         assert_eq!(meta.channel_id.as_deref(), Some("telegram.production"));
         assert_eq!(meta.sender_id.as_deref(), Some("@alice"));
         assert!(meta.room_id.is_none());
@@ -1506,8 +1570,8 @@ mod tests {
         backend.append("s1", &ChatMessage::user("b")).unwrap();
         backend.append("s2", &ChatMessage::user("c")).unwrap();
 
-        let single = backend.get_session_metadata("s1").unwrap();
-        let all = backend.list_sessions_with_metadata();
+        let single = backend.get_session_metadata("s1").unwrap().unwrap();
+        let all = backend.list_sessions_with_metadata().unwrap();
         let from_list = all.iter().find(|m| m.key == "s1").unwrap();
 
         assert_eq!(single.message_count, from_list.message_count);

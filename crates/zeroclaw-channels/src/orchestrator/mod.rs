@@ -11000,7 +11000,7 @@ pub async fn start_channels(
     // owner are skipped so their history doesn't end up loaded into the
     // fallback agent (which wouldn't reply on that channel anyway).
     if let Some(ref store) = shared_session_store {
-        let mut metadata = store.list_sessions_with_metadata();
+        let mut metadata = store.list_sessions_with_metadata()?;
         metadata.sort_by_key(|m| std::cmp::Reverse(m.last_activity));
         // Budget proportional to the number of agents — each gets up to
         // `MAX_CONVERSATION_SENDERS` slots, so a multi-agent install
@@ -11027,7 +11027,7 @@ pub async fn start_channels(
                 Some(ctx) => ctx,
                 None => continue,
             };
-            let mut msgs = store.load(&m.key);
+            let mut msgs = store.load(&m.key)?;
             if msgs.is_empty() {
                 continue;
             }
@@ -11430,8 +11430,8 @@ fn concurrent_persist_lock_serialization() {
         call_n: Arc<AtomicUsize>,
     }
     impl SessionBackend for OrderBackend {
-        fn load(&self, _key: &str) -> Vec<ChatMessage> {
-            vec![]
+        fn load(&self, _key: &str) -> std::io::Result<Vec<ChatMessage>> {
+            Ok(vec![])
         }
         fn append(&self, _key: &str, msg: &ChatMessage) -> std::io::Result<()> {
             let content = msg.content.clone();
@@ -11449,8 +11449,8 @@ fn concurrent_persist_lock_serialization() {
         fn remove_last(&self, _key: &str) -> std::io::Result<bool> {
             Ok(true)
         }
-        fn list_sessions(&self) -> Vec<String> {
-            vec![]
+        fn list_sessions(&self) -> std::io::Result<Vec<String>> {
+            Ok(vec![])
         }
     }
 
@@ -12130,6 +12130,7 @@ temperature = 0.3
 
             let metadata = session_store
                 .get_session_metadata(case.history_key)
+                .unwrap()
                 .unwrap();
             assert_eq!(metadata.channel_id.as_deref(), case.expected_channel);
             assert_eq!(metadata.room_id.as_deref(), case.expected_room);
@@ -13489,7 +13490,7 @@ api_key = "anthropic-key"
         assert_eq!(turns.len(), 2);
 
         // Session store should also have only 2 entries.
-        let persisted = store.load(&sender);
+        let persisted = store.load(&sender).expect("load should succeed");
         assert_eq!(
             persisted.len(),
             2,

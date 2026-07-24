@@ -100,7 +100,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let backend = make_session_backend(tmp.path(), "jsonl").unwrap();
         backend.append("k1", &user_msg("hello-jsonl")).unwrap();
-        let loaded = backend.load("k1");
+        let loaded = backend.load("k1").unwrap();
         assert_eq!(loaded.len(), 1);
         // The JSONL backend writes one file per session key.
         let jsonl = tmp.path().join("sessions").join("k1.jsonl");
@@ -112,7 +112,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let backend = make_session_backend(tmp.path(), "sqlite").unwrap();
         backend.append("k1", &user_msg("hello-sqlite")).unwrap();
-        let loaded = backend.load("k1");
+        let loaded = backend.load("k1").unwrap();
         assert_eq!(loaded.len(), 1);
         let db = tmp.path().join("sessions").join("sessions.db");
         assert!(db.exists(), "sqlite db must be written under sessions/");
@@ -144,7 +144,7 @@ mod tests {
             jsonl.append("legacy", &user_msg("from-jsonl")).unwrap();
         }
         let sqlite = make_session_backend(tmp.path(), "sqlite").unwrap();
-        let loaded = sqlite.load("legacy");
+        let loaded = sqlite.load("legacy").unwrap();
         assert_eq!(
             loaded.len(),
             1,

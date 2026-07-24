@@ -149,10 +149,8 @@ impl SessionStore {
 }
 
 impl SessionBackend for SessionStore {
-    fn load(&self, session_key: &str) -> Vec<ChatMessage> {
-        // For backward compatibility with callers expecting Vec, swallow IO errors
-        // as empty. The internal load() method propagates errors properly.
-        self.load(session_key).unwrap_or_default()
+    fn load(&self, session_key: &str) -> std::io::Result<Vec<ChatMessage>> {
+        self.load(session_key)
     }
 
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
@@ -163,20 +161,15 @@ impl SessionBackend for SessionStore {
         self.remove_last(session_key)
     }
 
-    fn list_sessions(&self) -> Vec<String> {
-        // For backward compatibility with callers expecting Vec, swallow IO errors
-        // as empty. The internal list_sessions() method propagates errors properly.
-        self.list_sessions().unwrap_or_default()
+    fn list_sessions(&self) -> std::io::Result<Vec<String>> {
+        self.list_sessions()
     }
 
-    fn list_sessions_with_metadata(&self) -> Vec<crate::session_backend::SessionMetadata> {
+    fn list_sessions_with_metadata(
+        &self,
+    ) -> std::io::Result<Vec<crate::session_backend::SessionMetadata>> {
         use chrono::{DateTime, Utc};
-        // For backward compatibility, swallow IO errors as empty list
-        // Internal method propagates errors properly
-        let sessions = match self.list_sessions() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        let sessions = self.list_sessions()?;
         sessions
             .into_iter()
             .map(|key| {
@@ -184,7 +177,7 @@ impl SessionBackend for SessionStore {
                     .session_mtime(&key)
                     .map(DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
-                crate::session_backend::SessionMetadata {
+                Ok(crate::session_backend::SessionMetadata {
                     name: None,
                     created_at: last_activity,
                     last_activity,
@@ -194,7 +187,7 @@ impl SessionBackend for SessionStore {
                     channel_id: None,
                     room_id: None,
                     sender_id: None,
-                }
+                })
             })
             .collect()
     }
@@ -212,10 +205,22 @@ impl SessionBackend for SessionStore {
     }
 
     /// Quick existence probe mirroring how `delete_session` decides whether
-    /// the session is on disk Checking file presence is the same
+    /// the session is on disk. Checking file presence is the same
     /// O(1) `stat` that `delete_session` itself performs.
-    fn session_exists(&self, session_key: &str) -> bool {
-        self.session_path(session_key).exists()
+    ///
+    /// Per contract: attempts to open the file to verify it's actually
+    /// accessible (not just present but unreadable due to permissions).
+    fn session_exists(&self, session_key: &str) -> std::io::Result<bool> {
+        let path = self.session_path(session_key);
+        if !path.exists() {
+            return Ok(false);
+        }
+        // Try to open the file to verify it's readable
+        match std::fs::File::open(&path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -388,7 +393,7 @@ mod tests {
         backend
             .append("trait_test", &ChatMessage::user("hello"))
             .unwrap();
-        let msgs = backend.load("trait_test");
+        let msgs = backend.load("trait_test").unwrap();
         assert_eq!(msgs.len(), 1);
     }
 
@@ -498,11 +503,11 @@ mod tests {
         backend
             .append("trait_delete", &ChatMessage::user("hello"))
             .unwrap();
-        assert_eq!(backend.load("trait_delete").len(), 1);
+        assert_eq!(backend.load("trait_delete").unwrap().len(), 1);
 
         let deleted = backend.delete_session("trait_delete").unwrap();
         assert!(deleted);
-        assert!(backend.load("trait_delete").is_empty());
+        assert!(backend.load("trait_delete").unwrap().is_empty());
     }
 
     // ── session_exists─────────────────────────────────────
@@ -512,15 +517,15 @@ mod tests {
         let store = SessionStore::new(tmp.path()).unwrap();
         let backend: &dyn SessionBackend = &store;
 
-        assert!(!backend.session_exists("ghost"));
+        assert!(!backend.session_exists("ghost").unwrap());
 
         backend
             .append("ghost", &ChatMessage::user("first"))
             .unwrap();
-        assert!(backend.session_exists("ghost"));
+        assert!(backend.session_exists("ghost").unwrap());
 
         backend.delete_session("ghost").unwrap();
-        assert!(!backend.session_exists("ghost"));
+        assert!(!backend.session_exists("ghost").unwrap());
     }
 
     // ── get_session_metadata (trait default) tests ──────────────────
@@ -530,7 +535,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = SessionStore::new(tmp.path()).unwrap();
         let backend: &dyn SessionBackend = &store;
-        assert!(backend.get_session_metadata("nonexistent").is_none());
+        assert!(
+            backend
+                .get_session_metadata("nonexistent")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -546,7 +556,10 @@ mod tests {
             .append("test_session", &ChatMessage::assistant("hi"))
             .unwrap();
 
-        let meta = backend.get_session_metadata("test_session").unwrap();
+        let meta = backend
+            .get_session_metadata("test_session")
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.key, "test_session");
         assert_eq!(meta.message_count, 2);
         assert!(meta.name.is_none());

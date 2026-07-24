@@ -1614,7 +1614,24 @@ pub async fn handle_api_sessions_list(
     // or a channel_id that resolves to an owning agent).
     // Pre-migration rows with neither set are skipped as orphans.
     let config = state.config.read().clone();
-    let all_metadata = backend.list_sessions_with_metadata();
+    let all_metadata = match backend.list_sessions_with_metadata() {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(::serde_json::json!({
+                        "error": format!("{e:#}"),
+                    })),
+                "Failed to list session metadata"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to list sessions"})),
+            )
+                .into_response();
+        }
+    };
     let sessions: Vec<serde_json::Value> = all_metadata
         .into_iter()
         .filter(|meta| meta.agent_alias.is_some() || meta.channel_id.is_some())
@@ -1684,7 +1701,25 @@ pub async fn handle_api_session_messages(
     } else {
         format!("gw_{id}")
     };
-    let msgs = backend.load_with_timestamps(&session_key);
+    let msgs = match backend.load_with_timestamps(&session_key) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(::serde_json::json!({
+                        "session_key": &session_key,
+                        "error": format!("{e:#}"),
+                    })),
+                "Failed to load session messages with timestamps"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to load session messages"})),
+            )
+                .into_response();
+        }
+    };
     let messages: Vec<serde_json::Value> = msgs
         .into_iter()
         .map(|m| {
@@ -1732,11 +1767,25 @@ pub async fn handle_api_session_message_post(
     };
 
     let session_key = format!("gw_{id}");
-    if !backend
-        .list_sessions()
-        .iter()
-        .any(|key| key == &session_key)
-    {
+    let sessions = match backend.list_sessions() {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(::serde_json::json!({
+                        "error": format!("{e:#}"),
+                    })),
+                "Failed to list sessions"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to list sessions"})),
+            )
+                .into_response();
+        }
+    };
+    if !sessions.iter().any(|key| key == &session_key) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
@@ -1880,7 +1929,24 @@ pub async fn handle_api_session_rename(
     let session_key = format!("gw_{id}");
 
     // Verify the session exists before renaming
-    let sessions = backend.list_sessions();
+    let sessions = match backend.list_sessions() {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(::serde_json::json!({
+                        "error": format!("{e:#}"),
+                    })),
+                "Failed to list sessions"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to list sessions"})),
+            )
+                .into_response();
+        }
+    };
     if !sessions.contains(&session_key) {
         return (
             StatusCode::NOT_FOUND,
@@ -1916,7 +1982,24 @@ pub async fn handle_api_sessions_running(
         .into_response();
     };
 
-    let running = backend.list_running_sessions();
+    let running = match backend.list_running_sessions() {
+        Ok(running) => running,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(::serde_json::json!({
+                        "error": format!("{e:#}"),
+                    })),
+                "Failed to list running sessions"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to list running sessions"})),
+            )
+                .into_response();
+        }
+    };
     let sessions: Vec<serde_json::Value> = running
         .into_iter()
         .filter_map(|meta| {
@@ -3227,7 +3310,7 @@ pub(crate) mod tests {
         assert_eq!(json["message"]["content"], "deploy finished");
         assert!(json.get("message_count").is_none());
 
-        let messages = backend.load("gw_operator-1");
+        let messages = backend.load("gw_operator-1").expect("load should succeed");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].content, "deploy finished");
@@ -3308,7 +3391,12 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let json = response_json(response).await;
         assert_eq!(json["error"], "Session not found");
-        assert!(backend.load("gw_operator-1").is_empty());
+        assert!(
+            backend
+                .load("gw_operator-1")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3349,7 +3437,13 @@ pub(crate) mod tests {
                 .is_err(),
             "POST should wait behind the active session queue guard"
         );
-        assert_eq!(backend.load("gw_operator-1").len(), 1);
+        assert_eq!(
+            backend
+                .load("gw_operator-1")
+                .expect("load should succeed")
+                .len(),
+            1
+        );
 
         drop(session_guard);
         let response = tokio::time::timeout(Duration::from_secs(1), response_fut)
@@ -3358,7 +3452,7 @@ pub(crate) mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let messages = backend.load("gw_operator-1");
+        let messages = backend.load("gw_operator-1").expect("load should succeed");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].content, "queued notification");
     }

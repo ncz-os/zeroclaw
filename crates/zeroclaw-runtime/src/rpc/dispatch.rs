@@ -934,7 +934,20 @@ impl RpcDispatcher {
             .ctx
             .session_backend
             .as_ref()
-            .map(|b| b.list_sessions_with_metadata().len())
+            .map(|b| match b.list_sessions_with_metadata() {
+                Ok(metadata) => metadata.len(),
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_attrs(::serde_json::json!({
+                                "error": format!("{e:#}"),
+                            })),
+                        "Failed to list session metadata for status"
+                    );
+                    0
+                }
+            })
             .unwrap_or(0);
         let total = ids.len().max(persisted_count);
         to_result(StatusResult {
@@ -1303,7 +1316,9 @@ impl RpcDispatcher {
                 if let Some(ref backend) = self.ctx.session_backend {
                     let session_key = format!("rpc_{session_id}");
                     let _ = backend.set_session_agent_alias(&session_key, &req.agent_alias);
-                    let stored = backend.load(&session_key);
+                    let stored = backend.load(&session_key).map_err(|e| {
+                        rpc_err(INTERNAL_ERROR, format!("Failed to load session: {e}"))
+                    })?;
                     if !stored.is_empty() {
                         let seed_event = self
                             .ctx
@@ -2195,16 +2210,24 @@ impl RpcDispatcher {
         // Use FTS when a query is provided, plain list otherwise.
         let all = if let Some(ref keyword) = req.query {
             if keyword.trim().is_empty() {
-                backend.list_sessions_with_metadata()
+                backend
+                    .list_sessions_with_metadata()
+                    .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?
             } else {
                 use zeroclaw_infra::session_backend::SessionQuery;
-                backend.search(&SessionQuery {
-                    keyword: Some(keyword.clone()),
-                    limit: req.limit,
-                })
+                backend
+                    .search(&SessionQuery {
+                        keyword: Some(keyword.clone()),
+                        limit: req.limit,
+                    })
+                    .map_err(|e| {
+                        rpc_err(INTERNAL_ERROR, format!("Failed to search sessions: {e}"))
+                    })?
             }
         } else {
-            backend.list_sessions_with_metadata()
+            backend
+                .list_sessions_with_metadata()
+                .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?
         };
 
         let sessions: Vec<SessionEntry> = all
@@ -2291,7 +2314,9 @@ impl RpcDispatcher {
         ];
         let mut raw: Vec<zeroclaw_api::model_provider::ChatMessage> = Vec::new();
         for key in &candidates {
-            let loaded = backend.load(key);
+            let loaded = backend
+                .load(key)
+                .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to load session: {e}")))?;
             if !loaded.is_empty() {
                 raw = loaded;
                 break;
@@ -3340,7 +3365,10 @@ impl RpcDispatcher {
         let rpc_counts = self.ctx.sessions.count_by_agent().await;
         let mut backend_counts = std::collections::HashMap::<String, usize>::new();
         if let Some(ref backend) = self.ctx.session_backend {
-            for meta in backend.list_sessions_with_metadata() {
+            for meta in backend
+                .list_sessions_with_metadata()
+                .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?
+            {
                 let alias = meta.agent_alias.or_else(|| {
                     meta.channel_id
                         .as_deref()
@@ -7562,7 +7590,10 @@ mod tests {
         );
 
         assert!(
-            chat_backend.load(&format!("rpc_{sid}")).is_empty(),
+            chat_backend
+                .load(&format!("rpc_{sid}"))
+                .expect("load should succeed")
+                .is_empty(),
             "ACP session must NOT touch chat session_backend"
         );
     }
@@ -7634,7 +7665,10 @@ mod tests {
         // regression for the ACP-store fallback.
         for key in [sid.to_string(), format!("rpc_{sid}"), format!("gw_{sid}")] {
             assert!(
-                chat_backend.load(&key).is_empty(),
+                chat_backend
+                    .load(&key)
+                    .expect("load should succeed")
+                    .is_empty(),
                 "precondition: unified backend has no rows for {key}"
             );
         }
@@ -7964,7 +7998,9 @@ mod tests {
         );
 
         let key = format!("rpc_{sid}");
-        let metadata = chat_backend.list_sessions_with_metadata();
+        let metadata = chat_backend
+            .list_sessions_with_metadata()
+            .expect("list_sessions_with_metadata should succeed");
         let entry = metadata
             .iter()
             .find(|m| m.key == key)

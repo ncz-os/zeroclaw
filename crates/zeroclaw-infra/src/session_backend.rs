@@ -69,6 +69,14 @@ pub struct TimestampedMessage {
 ///
 /// Implementations must be `Send + Sync` for sharing across async tasks.
 ///
+/// ## Fallible Read Contract
+///
+/// All read methods return `std::io::Result<T>`. A successful `Ok` result
+/// means the backend read succeeded. An `Err` means a real I/O failure
+/// occurred (corrupt database, permission denied, disk full, etc.).
+/// Callers must NOT treat read errors as "empty data" — errors must be
+/// logged and the operation failed explicitly.
+///
 /// ## Multiword Search Contract
 ///
 /// The `search` method interprets multiword queries as **OR** combinations:
@@ -76,20 +84,23 @@ pub struct TimestampedMessage {
 /// This preserves SQLite FTS5's default behavior so switching backends never
 /// silently narrows results. Later backends MUST match this contract.
 pub trait SessionBackend: Send + Sync {
-    /// Load all messages for a session. Returns empty vec if session doesn't exist.
-    fn load(&self, session_key: &str) -> Vec<ChatMessage>;
+    /// Load all messages for a session.
+    ///
+    /// Returns `Ok(Vec::new())` only when the session genuinely doesn't exist.
+    /// Any I/O error (corrupt DB, permission denied, etc.) returns `Err`.
+    fn load(&self, session_key: &str) -> std::io::Result<Vec<ChatMessage>>;
 
     /// Same as `load`, but each row carries its persisted `created_at`
-    /// when the backend has one. Default impl falls back to `load`
-    /// without timestamps so non-SQLite backends keep working.
-    fn load_with_timestamps(&self, session_key: &str) -> Vec<TimestampedMessage> {
-        self.load(session_key)
+    /// when the backend has one.
+    fn load_with_timestamps(&self, session_key: &str) -> std::io::Result<Vec<TimestampedMessage>> {
+        Ok(self
+            .load(session_key)?
             .into_iter()
             .map(|message| TimestampedMessage {
                 message,
                 created_at: None,
             })
-            .collect()
+            .collect())
     }
 
     /// Append a single message to a session.
@@ -108,18 +119,28 @@ pub trait SessionBackend: Send + Sync {
     }
 
     /// List all session keys.
-    fn list_sessions(&self) -> Vec<String>;
+    ///
+    /// Returns `Ok(Vec::new())` only when no sessions exist.
+    /// Any I/O error (unreadable directory, corrupt DB, etc.) returns `Err`.
+    fn list_sessions(&self) -> std::io::Result<Vec<String>>;
 
     /// List sessions with metadata.
-    fn list_sessions_with_metadata(&self) -> Vec<SessionMetadata> {
-        // Default: construct metadata from messages (backends can override for efficiency)
-        self.list_sessions()
+    ///
+    /// ## Performance Note
+    ///
+    /// The default implementation calls `load()` and `get_session_name()` for each
+    /// session, resulting in O(N) database queries. Implementations with a joined
+    /// query capability (e.g., SQLite) should override this for better performance.
+    fn list_sessions_with_metadata(&self) -> std::io::Result<Vec<SessionMetadata>> {
+        let sessions = self.list_sessions()?;
+        sessions
             .into_iter()
-            .map(|key| {
-                let messages = self.load(&key);
-                SessionMetadata {
+            .map(|key| -> std::io::Result<_> {
+                let messages = self.load(&key)?;
+                let name = self.get_session_name(&key).ok().flatten();
+                Ok(SessionMetadata {
                     key,
-                    name: None,
+                    name,
                     created_at: Utc::now(),
                     last_activity: Utc::now(),
                     message_count: messages.len(),
@@ -127,9 +148,9 @@ pub trait SessionBackend: Send + Sync {
                     channel_id: None,
                     room_id: None,
                     sender_id: None,
-                }
+                })
             })
-            .collect()
+            .collect::<std::io::Result<Vec<_>>>()
     }
 
     /// Compact a session file (remove duplicates/corruption). No-op by default.
@@ -142,9 +163,13 @@ pub trait SessionBackend: Send + Sync {
         Ok(0)
     }
 
-    /// Search sessions by keyword. Default returns empty (backends with FTS override).
-    fn search(&self, _query: &SessionQuery) -> Vec<SessionMetadata> {
-        Vec::new()
+    /// Search sessions by keyword.
+    ///
+    /// Returns `Ok(Vec::new())` when no sessions match the query.
+    /// Any I/O error returns `Err`.
+    fn search(&self, query: &SessionQuery) -> std::io::Result<Vec<SessionMetadata>> {
+        let _ = query;
+        Ok(Vec::new())
     }
 
     fn clear_messages(&self, session_key: &str) -> std::io::Result<usize> {
@@ -172,8 +197,12 @@ pub trait SessionBackend: Send + Sync {
         Ok(0)
     }
 
-    fn session_exists(&self, session_key: &str) -> bool {
-        self.get_session_metadata(session_key).is_some()
+    fn session_exists(&self, session_key: &str) -> std::io::Result<bool> {
+        match self.get_session_metadata(session_key) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Set or update the human-readable name for a session.
@@ -210,12 +239,12 @@ pub trait SessionBackend: Send + Sync {
         Ok(())
     }
 
-    fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
-        let messages = self.load(session_key);
+    fn get_session_metadata(&self, session_key: &str) -> std::io::Result<Option<SessionMetadata>> {
+        let messages = self.load(session_key)?;
         if messages.is_empty() {
-            return None;
+            return Ok(None);
         }
-        Some(SessionMetadata {
+        Ok(Some(SessionMetadata {
             key: session_key.to_string(),
             name: self.get_session_name(session_key).ok().flatten(),
             created_at: Utc::now(),
@@ -225,7 +254,7 @@ pub trait SessionBackend: Send + Sync {
             channel_id: None,
             room_id: None,
             sender_id: None,
-        })
+        }))
     }
 
     /// Set the session state (e.g. "idle", "running", "error").
@@ -245,13 +274,13 @@ pub trait SessionBackend: Send + Sync {
     }
 
     /// List sessions currently in "running" state.
-    fn list_running_sessions(&self) -> Vec<SessionMetadata> {
-        Vec::new()
+    fn list_running_sessions(&self) -> std::io::Result<Vec<SessionMetadata>> {
+        Ok(Vec::new())
     }
 
     /// List sessions stuck in "running" state longer than `threshold_secs`.
-    fn list_stuck_sessions(&self, _threshold_secs: u64) -> Vec<SessionMetadata> {
-        Vec::new()
+    fn list_stuck_sessions(&self, _threshold_secs: u64) -> std::io::Result<Vec<SessionMetadata>> {
+        Ok(Vec::new())
     }
 }
 

@@ -49,7 +49,7 @@ fn validate_session_id(session_id: &str) -> Result<(), SessionValidationError> {
 
 fn resolve_existing_session_key(backend: &dyn SessionBackend, session_id: &str) -> Option<String> {
     let requested = session_id.trim();
-    let sessions = backend.list_sessions();
+    let sessions = backend.list_sessions().ok()?;
     if sessions.iter().any(|key| key == requested) {
         return Some(requested.to_string());
     }
@@ -92,7 +92,7 @@ impl SessionOwnershipScope {
             return Ok(session_id.trim().to_string());
         };
 
-        let Some(metadata) = backend.get_session_metadata(&session_key) else {
+        let Ok(Some(metadata)) = backend.get_session_metadata(&session_key) else {
             return Err(format!(
                 "Session '{session_id}' exists but has no ownership metadata; refusing destructive session operation from agent '{}'.",
                 self.agent_alias
@@ -168,7 +168,7 @@ impl Tool for SessionsListTool {
             .and_then(serde_json::Value::as_u64)
             .map_or(50, |v| v as usize);
 
-        let metadata = self.backend.list_sessions_with_metadata();
+        let metadata = self.backend.list_sessions_with_metadata()?;
 
         if metadata.is_empty() {
             return Ok(ToolResult {
@@ -275,7 +275,10 @@ impl Tool for SessionsHistoryTool {
             .and_then(serde_json::Value::as_u64)
             .map_or(20, |v| v as usize);
 
-        let messages = self.backend.load(session_id);
+        let messages = self
+            .backend
+            .load(session_id)
+            .expect("load should succeed in tests");
 
         if messages.is_empty() {
             return Ok(ToolResult {
@@ -487,7 +490,7 @@ impl Tool for SessionsCurrentTool {
         };
 
         let mut output = format!("Current session: {key}\n");
-        if let Some(meta) = self.backend.get_session_metadata(&key) {
+        if let Ok(Some(meta)) = self.backend.get_session_metadata(&key) {
             if let Some(name) = meta.name.filter(|name| !name.is_empty()) {
                 let _ = writeln!(output, "Name: {name}");
             }
@@ -726,7 +729,11 @@ impl Tool for SessionDeleteTool {
                 .unwrap_or_else(|| session_id.trim().to_string()),
         };
 
-        let existed = !self.backend.load(&target_session_key).is_empty();
+        let existed = !self
+            .backend
+            .load(&target_session_key)
+            .expect("load should succeed in tests")
+            .is_empty();
 
         match self.backend.delete_session(&target_session_key) {
             Ok(true) => Ok(ToolResult {
@@ -818,7 +825,7 @@ mod tests {
     }
 
     impl SessionBackend for MetadataBackend {
-        fn load(&self, key: &str) -> Vec<ChatMessage> {
+        fn load(&self, key: &str) -> std::io::Result<Vec<ChatMessage>> {
             self.inner.load(key)
         }
 
@@ -830,7 +837,7 @@ mod tests {
             self.inner.remove_last(key)
         }
 
-        fn list_sessions(&self) -> Vec<String> {
+        fn list_sessions(&self) -> std::io::Result<Vec<String>> {
             self.inner.list_sessions()
         }
 
@@ -846,18 +853,23 @@ mod tests {
             Ok(deleted)
         }
 
-        fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
-            self.metadata
-                .lock()
-                .unwrap()
-                .get(session_key)
-                .cloned()
-                .or_else(|| self.inner.get_session_metadata(session_key))
+        fn get_session_metadata(
+            &self,
+            session_key: &str,
+        ) -> std::io::Result<Option<SessionMetadata>> {
+            if let Some(meta) = self.metadata.lock().unwrap().get(session_key).cloned() {
+                return Ok(Some(meta));
+            }
+            // Fall back to inner backend, propagating any errors
+            self.inner.get_session_metadata(session_key)
         }
 
-        fn session_exists(&self, session_key: &str) -> bool {
-            self.metadata.lock().unwrap().contains_key(session_key)
-                || self.inner.session_exists(session_key)
+        fn session_exists(&self, session_key: &str) -> std::io::Result<bool> {
+            if self.metadata.lock().unwrap().contains_key(session_key) {
+                return Ok(true);
+            }
+            // Fall back to inner backend, propagating any errors
+            self.inner.session_exists(session_key)
         }
     }
 
@@ -1073,7 +1085,9 @@ mod tests {
         assert!(result.output.contains("Message sent"));
 
         // Verify message was appended
-        let messages = backend.load("telegram__alice");
+        let messages = backend
+            .load("telegram__alice")
+            .expect("load should succeed");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].role, "user");
         assert_eq!(messages[1].content, "Hello from another agent");
@@ -1092,7 +1106,9 @@ mod tests {
             .unwrap();
         assert!(result.success);
 
-        let messages = backend.load("telegram__alice");
+        let messages = backend
+            .load("telegram__alice")
+            .expect("load should succeed");
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[2].content, "Inter-agent message");
     }
@@ -1119,11 +1135,16 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("gw_operator-1"));
 
-        let gateway_messages = backend.load("gw_operator-1");
+        let gateway_messages = backend.load("gw_operator-1").expect("load should succeed");
         assert_eq!(gateway_messages.len(), 2);
         assert_eq!(gateway_messages[1].role, "user");
         assert_eq!(gateway_messages[1].content, "Wake up");
-        assert!(backend.load("operator-1").is_empty());
+        assert!(
+            backend
+                .load("operator-1")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1147,8 +1168,18 @@ mod tests {
                 .unwrap_or_default()
                 .contains("not found")
         );
-        assert!(backend.load("operator-1").is_empty());
-        assert!(backend.load("gw_operator-1").is_empty());
+        assert!(
+            backend
+                .load("operator-1")
+                .expect("load should succeed")
+                .is_empty()
+        );
+        assert!(
+            backend
+                .load("gw_operator-1")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1314,7 +1345,9 @@ mod tests {
         assert!(result.output.contains("2 messages cleared"));
 
         // Verify messages are gone
-        let messages = backend.load("telegram__alice");
+        let messages = backend
+            .load("telegram__alice")
+            .expect("load should succeed");
         assert!(messages.is_empty());
     }
 
@@ -1339,7 +1372,7 @@ mod tests {
             .unwrap();
 
         // Bob's session should be untouched
-        let bob_msgs = backend.load("discord__bob");
+        let bob_msgs = backend.load("discord__bob").expect("load should succeed");
         assert_eq!(bob_msgs.len(), 1);
     }
 
@@ -1364,7 +1397,12 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("2 messages cleared"));
-        assert!(backend.load("telegram__alice").is_empty());
+        assert!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1388,7 +1426,13 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.unwrap().contains("owned by agent 'sable'"));
-        assert_eq!(backend.load("telegram__alice").len(), 2);
+        assert_eq!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1411,7 +1455,12 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-        assert!(backend.load("telegram__alice").is_empty());
+        assert!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1435,7 +1484,13 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.unwrap().contains("not owned by agent 'rowan'"));
-        assert_eq!(backend.load("telegram__alice").len(), 2);
+        assert_eq!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1459,7 +1514,13 @@ mod tests {
                 .unwrap()
                 .contains("no agent or channel ownership metadata")
         );
-        assert_eq!(backend.load("telegram__alice").len(), 2);
+        assert_eq!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1499,7 +1560,9 @@ mod tests {
         assert!(result.output.contains("deleted"));
 
         // Verify session is gone
-        let messages = backend.load("telegram__alice");
+        let messages = backend
+            .load("telegram__alice")
+            .expect("load should succeed");
         assert!(messages.is_empty());
     }
 
@@ -1524,7 +1587,7 @@ mod tests {
             .unwrap();
 
         // Bob's session should be untouched
-        let bob_msgs = backend.load("discord__bob");
+        let bob_msgs = backend.load("discord__bob").expect("load should succeed");
         assert_eq!(bob_msgs.len(), 1);
     }
 
@@ -1549,7 +1612,12 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("deleted"));
-        assert!(backend.load("telegram__alice").is_empty());
+        assert!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1573,7 +1641,13 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.unwrap().contains("owned by agent 'sable'"));
-        assert_eq!(backend.load("telegram__alice").len(), 2);
+        assert_eq!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1596,7 +1670,12 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-        assert!(backend.load("telegram__alice").is_empty());
+        assert!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1620,7 +1699,13 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.unwrap().contains("not owned by agent 'rowan'"));
-        assert_eq!(backend.load("telegram__alice").len(), 2);
+        assert_eq!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1644,7 +1729,13 @@ mod tests {
                 .unwrap()
                 .contains("no agent or channel ownership metadata")
         );
-        assert_eq!(backend.load("telegram__alice").len(), 2);
+        assert_eq!(
+            backend
+                .load("telegram__alice")
+                .expect("load should succeed")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1679,7 +1770,7 @@ mod tests {
     struct NoOpDeleteBackend(Arc<dyn SessionBackend>);
 
     impl SessionBackend for NoOpDeleteBackend {
-        fn load(&self, key: &str) -> Vec<ChatMessage> {
+        fn load(&self, key: &str) -> std::io::Result<Vec<ChatMessage>> {
             self.0.load(key)
         }
         fn append(&self, key: &str, msg: &ChatMessage) -> std::io::Result<()> {
@@ -1688,7 +1779,7 @@ mod tests {
         fn remove_last(&self, key: &str) -> std::io::Result<bool> {
             self.0.remove_last(key)
         }
-        fn list_sessions(&self) -> Vec<String> {
+        fn list_sessions(&self) -> std::io::Result<Vec<String>> {
             self.0.list_sessions()
         }
     }
