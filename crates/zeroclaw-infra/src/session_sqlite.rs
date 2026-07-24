@@ -434,7 +434,12 @@ impl SessionBackend for SqliteSessionBackend {
             let rows = stmt
                 .query_map(params![cutoff], |row| row.get(0))
                 .map_err(std::io::Error::other)?;
-            rows.filter_map(|r| r.ok()).collect()
+            // Collect rows, propagating any iteration errors
+            let mut keys = Vec::new();
+            for row in rows {
+                keys.push(row.map_err(std::io::Error::other)?);
+            }
+            keys
         };
 
         let count = stale_keys.len();

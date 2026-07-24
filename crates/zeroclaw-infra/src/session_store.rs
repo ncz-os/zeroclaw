@@ -151,7 +151,7 @@ impl SessionStore {
 impl SessionBackend for SessionStore {
     fn load(&self, session_key: &str) -> Vec<ChatMessage> {
         // For backward compatibility with callers expecting Vec, swallow IO errors
-        // as empty. The real error propagation happens at the async facade layer.
+        // as empty. The internal load() method propagates errors properly.
         self.load(session_key).unwrap_or_default()
     }
 
@@ -165,13 +165,14 @@ impl SessionBackend for SessionStore {
 
     fn list_sessions(&self) -> Vec<String> {
         // For backward compatibility with callers expecting Vec, swallow IO errors
-        // as empty. The real error propagation happens at the async facade layer.
+        // as empty. The internal list_sessions() method propagates errors properly.
         self.list_sessions().unwrap_or_default()
     }
 
     fn list_sessions_with_metadata(&self) -> Vec<crate::session_backend::SessionMetadata> {
         use chrono::{DateTime, Utc};
         // For backward compatibility, swallow IO errors as empty list
+        // Internal method propagates errors properly
         let sessions = match self.list_sessions() {
             Ok(s) => s,
             Err(_) => return Vec::new(),
