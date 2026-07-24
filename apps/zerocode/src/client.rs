@@ -505,10 +505,10 @@ async fn request_initialize(
 ) -> Result<Value> {
     match tokio::time::timeout(timeout, rpc.request(method::INITIALIZE, init_params)).await {
         Ok(Ok(resp)) => Ok(resp),
-        Ok(Err(e)) => Err(anyhow::Error::msg(format!(
-            "initialize: {} ({})",
-            e.message, e.code
-        ))),
+        Ok(Err(e)) => {
+            let err = anyhow::Error::msg(e.message);
+            Err(err.context("RPC call: initialize"))
+        }
         Err(_) => Err(DaemonInitializeTimeout::new(timeout).into()),
     }
 }

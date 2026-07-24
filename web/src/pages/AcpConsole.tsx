@@ -204,6 +204,8 @@ export default function AcpConsole() {
       title: t('acp.agent_thought'),
       content: thought,
     });
+    // Clear the buffer only after successfully adding the thought
+    thoughtBufferRef.current.clear();
   }, []);
 
   const resetTurnStream = useCallback(() => {
