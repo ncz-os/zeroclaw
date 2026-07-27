@@ -6680,12 +6680,13 @@ mod tests {
         let secret = "fake-nextcloud-webhook-secret-not-real";
         let random = "0123456789abcdef0123456789abcdef";
 
-        // The same secret governs both directions now, so the channel gets it
-        // too rather than the empty string this test used to pass.
+        // The same secret governs both directions now, so the channel is built
+        // with that resolved secret as its bot token rather than the `None` this
+        // test used to pass.
         let channel = Arc::new(NextcloudTalkChannel::new(
             "https://cloud.example.com".into(),
-            None,
-            secret.to_string(),
+            Some(secret.to_string()),
+            String::new(),
             "default",
             Arc::new(|| vec!["*".to_string()]),
         ));

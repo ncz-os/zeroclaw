@@ -14,7 +14,10 @@ Nextcloud Talk integration via the Talk Bot webhook protocol. Self-hosted, feder
 
 ## Prerequisites
 
-- **Nextcloud server** with the Talk app enabled (v17 or later recommended)
+- **Nextcloud server 27.1 or later with Talk 17.1 or later.** This is a hard
+  minimum, not a recommendation: the signed Talk Bot API this integration uses to
+  send replies was introduced in Talk 17.1, and `occ talk:bot:install` below is
+  unavailable on earlier releases.
 - **Bot installed** with both the `webhook` and `response` features, which let
   Nextcloud deliver room messages to ZeroClaw and let ZeroClaw send replies:
 
