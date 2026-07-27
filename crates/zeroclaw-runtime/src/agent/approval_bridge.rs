@@ -77,6 +77,7 @@ impl Channel for AskUserApprovalBridge {
                         response,
                         decided_by: decider,
                         source,
+                        ..Default::default()
                     }));
                 }
                 RoutedApproval::Fallthrough => {

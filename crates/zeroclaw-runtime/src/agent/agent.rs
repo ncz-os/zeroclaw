@@ -276,6 +276,7 @@ impl zeroclaw_api::channel::Channel for RoutedApprovalChannel {
                 response,
                 decided_by: decider,
                 source,
+                ..Default::default()
             })),
             // No originating channel to inherit on this path; let the gate apply
             // the non-interactive default (auto-deny).

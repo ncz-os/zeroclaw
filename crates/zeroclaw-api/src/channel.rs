@@ -93,7 +93,15 @@ pub enum ChannelApprovalResponse {
 /// trail attributes the decision to the deciding surface. The attribution
 /// travels with the returned decision, so concurrent approvals on the same
 /// channel instance cannot cross-wire it. Single channels leave it `None`.
+///
+/// Marked `#[non_exhaustive]` so the addition of new provenance fields is
+/// additive: out-of-tree code that constructs this struct literally must use
+/// the `..` wildcard with [`AttributedApprovalResponse::default`] (or one of
+/// the constructors below). The [`Default`] impl carries the legacy
+/// "a person answered" semantics, so an out-of-tree constructor that does not
+/// care about provenance keeps the previous meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AttributedApprovalResponse {
     pub response: ChannelApprovalResponse,
     pub decided_by: Option<String>,
@@ -110,6 +118,24 @@ pub struct AttributedApprovalResponse {
     /// Conflating the two produced a tool result that told the model
     /// "Denied by user." on runs where no human was ever asked.
     pub source: ApprovalSource,
+}
+
+/// Source-compatible default for [`AttributedApprovalResponse`].
+///
+/// Matches the meaning `AttributedApprovalResponse` had before the `source`
+/// field was added: an `Approve` response with no deciding channel, attributed
+/// to an operator. Out-of-tree callers using the struct as
+/// `AttributedApprovalResponse { response, decided_by, ..Default::default() }`
+/// keep the previous semantics after this PR; the wildcard syntax is the only
+/// shape they need to add.
+impl Default for AttributedApprovalResponse {
+    fn default() -> Self {
+        Self {
+            response: ChannelApprovalResponse::Approve,
+            decided_by: None,
+            source: ApprovalSource::Operator,
+        }
+    }
 }
 
 /// Who decided an approval outcome.
