@@ -7457,6 +7457,106 @@ mod tests {
         assert!(!tool_results.content.contains("Denied by user."));
     }
 
+    /// An auto-denial in a non-interactive run must not claim a user denied it.
+    ///
+    /// With no channel able to answer, the gate denies on the runtime's own authority. Reporting
+    /// that as "Denied by user." is false and actively misleading: it sends the model looking for
+    /// an operator decision that never happened, and hides the real remedy, which is the agent's
+    /// `auto_approve` policy.
+    #[tokio::test]
+    async fn run_tool_call_loop_reports_unanswerable_approval_without_blaming_the_user() {
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let write_call = r#"<tool_call>
+{"name":"file_write","arguments":{"path":"a.txt","content":"x"}}
+</tool_call>"#;
+        let model_provider = ScriptedModelProvider::from_text_responses(vec![write_call, "done"]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "file_write",
+            Arc::clone(&invocations),
+        ))];
+
+        let approval_mgr = ApprovalManager::for_non_interactive(
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+        );
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("write a file"),
+        ];
+        let observer = NoopObserver;
+
+        let _ = run_tool_call_loop(ToolLoop {
+            parent_agent_alias: None,
+            sop_reassembly: None,
+            exec: ResolvedAgentExecution {
+                model_access: ResolvedModelAccess {
+                    model_provider: &model_provider,
+                    provider_name: "mock-provider",
+                    model: "mock-model",
+                    temperature: Some(0.0),
+                },
+                tools_registry: &tools_registry,
+                observer: &observer,
+                silent: true,
+                approval: Some(&approval_mgr),
+                multimodal_config: &zeroclaw_config::schema::MultimodalConfig::default(),
+                config: None,
+                max_tool_iterations: 4,
+                hooks: None,
+                excluded_tools: &[],
+                dedup_exempt_tools: &[],
+                activated_tools: None,
+                model_switch_callback: None,
+                pacing: &zeroclaw_config::schema::PacingConfig::default(),
+                strict_tool_parsing: false,
+                parallel_tools: false,
+                max_tool_result_chars: 0,
+                context_token_budget: 0,
+                receipt_generator: None,
+                knobs: &LoopKnobs::default(),
+            },
+            history: &mut history,
+            channel_name: "telegram",
+            channel_reply_target: None,
+            cancellation_token: None,
+            on_delta: None,
+            shared_budget: None,
+            channel: None,
+            collected_receipts: None,
+            event_tx: None,
+            steering: None,
+            new_messages_out: None,
+            image_cache: None,
+            memory: None,
+            ingress: IngressContext::sub_turn(),
+            agent_alias: None,
+            turn_id: &turn_id,
+        })
+        .await;
+
+        let tool_results = history
+            .iter()
+            .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
+            .expect("tool results message should be present");
+        assert!(
+            !tool_results.content.contains("Denied by user."),
+            "an unanswerable approval must not be attributed to a user: {}",
+            tool_results.content
+        );
+        assert!(
+            tool_results.content.contains("requires approval")
+                && tool_results.content.contains("auto_approve"),
+            "the denial should explain why and name the remedy: {}",
+            tool_results.content
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "a denied tool must not execute"
+        );
+    }
+
     #[tokio::test]
     async fn run_tool_call_loop_aborts_repeated_prompt_required_shell_before_reprompting() {
         let turn_id = uuid::Uuid::new_v4().to_string();

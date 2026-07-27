@@ -40,7 +40,7 @@ pub(crate) async fn gate_tool_approval(
         // Non-interactive (channels): try the channel's inline
         // approval (e.g. Telegram inline keyboard) before falling
         // back to auto-deny.
-        let (decision, decided_by) = if mgr.is_non_interactive() {
+        let (decision, decided_by, unanswerable) = if mgr.is_non_interactive() {
             let attributed = if let Some(ch) = ctx.channel {
                 let ch_request = zeroclaw_api::channel::ChannelApprovalRequest {
                     tool_name: request.tool_name.clone(),
@@ -73,6 +73,10 @@ pub(crate) async fn gate_tool_approval(
             // back on the response itself, so attribution can't be cross-wired
             // by a concurrent approval on the same channel instance.
             let decided_by = attributed.as_ref().and_then(|a| a.decided_by.clone());
+            // No channel, a channel that cannot ask, or a failed request: nobody was ever in a
+            // position to answer. The resulting denial is the runtime's own, not a decision by
+            // any operator, and the tool result must not claim otherwise.
+            let unanswerable = attributed.is_none();
             let decision = match attributed.map(|a| a.response) {
                 Some(zeroclaw_api::channel::ChannelApprovalResponse::Approve) => {
                     ApprovalResponse::Yes
@@ -87,16 +91,25 @@ pub(crate) async fn gate_tool_approval(
                 // Channel doesn't support approval — auto-deny.
                 None => ApprovalResponse::No,
             };
-            (decision, decided_by)
+            (decision, decided_by, unanswerable)
         } else {
-            (mgr.prompt_cli(&request), None)
+            (mgr.prompt_cli(&request), None, false)
         };
 
         let decision_channel = decided_by.unwrap_or_else(|| ctx.channel_name.to_string());
         mgr.record_decision(tool_name, tool_args, &decision, &decision_channel);
 
         if decision == ApprovalResponse::No {
-            let denied = "Denied by user.".to_string();
+            let denied = if unanswerable {
+                format!(
+                    "Tool call not executed: '{tool_name}' requires approval, but this run is \
+                     non-interactive and no connected channel can answer an approval request. \
+                     No operator was asked. Add '{tool_name}' to the agent risk profile's \
+                     `auto_approve` (or set `level = \"full\"`) to allow it here."
+                )
+            } else {
+                "Denied by user.".to_string()
+            };
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
