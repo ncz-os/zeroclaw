@@ -7546,10 +7546,26 @@ mod tests {
         );
         assert!(
             tool_results.content.contains("requires approval")
-                && tool_results.content.contains("auto_approve"),
-            "the denial should explain why and name the remedy: {}",
+                && tool_results
+                    .content
+                    .contains("no operator decision was available"),
+            "the denial should state the outcome and that no operator decided: {}",
             tool_results.content
         );
+        // The model must not be told how to switch its own approval policy off.
+        // `auto_approve` bypasses operator approval for the named tool and
+        // `level = "full"` removes approval gates for every tool while dropping
+        // workspace-only confinement, so naming either here hands the model an
+        // argument for expanding its own privileges in response to an approval
+        // channel simply being unavailable. Operators get that guidance from the
+        // WARN record's `operator_hint` instead.
+        for leak in ["auto_approve", "level = \"full\"", "risk profile"] {
+            assert!(
+                !tool_results.content.contains(leak),
+                "model-visible denial must not prescribe a policy bypass ({leak}): {}",
+                tool_results.content
+            );
+        }
         assert_eq!(
             invocations.load(Ordering::SeqCst),
             0,

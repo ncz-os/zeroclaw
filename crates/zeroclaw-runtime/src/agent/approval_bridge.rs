@@ -68,10 +68,15 @@ impl Channel for AskUserApprovalBridge {
     ) -> anyhow::Result<Option<AttributedApprovalResponse>> {
         if let Some(route) = &self.route {
             match resolve_routed_approval(&self.handles, route, recipient, request).await {
-                RoutedApproval::Decided { response, decider } => {
+                RoutedApproval::Decided {
+                    response,
+                    decider,
+                    source,
+                } => {
                     return Ok(Some(AttributedApprovalResponse {
                         response,
                         decided_by: decider,
+                        source,
                     }));
                 }
                 RoutedApproval::Fallthrough => {
@@ -95,6 +100,8 @@ impl Channel for AskUserApprovalBridge {
                     return Ok(Some(AttributedApprovalResponse {
                         response,
                         decided_by: Some(channel_name.clone()),
+                        // A back-channel returned an answer, so a person decided.
+                        source: zeroclaw_api::channel::ApprovalSource::Operator,
                     }));
                 }
                 Ok(None) => continue,

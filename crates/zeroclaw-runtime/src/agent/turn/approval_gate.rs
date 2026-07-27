@@ -73,10 +73,19 @@ pub(crate) async fn gate_tool_approval(
             // back on the response itself, so attribution can't be cross-wired
             // by a concurrent approval on the same channel instance.
             let decided_by = attributed.as_ref().and_then(|a| a.decided_by.clone());
-            // No channel, a channel that cannot ask, or a failed request: nobody was ever in a
-            // position to answer. The resulting denial is the runtime's own, not a decision by
-            // any operator, and the tool result must not claim otherwise.
-            let unanswerable = attributed.is_none();
+            // Whether an operator actually decided, taken from the response's own
+            // provenance rather than inferred.
+            //
+            // `attributed.is_none()` is NOT sufficient: a fail-closed approval route
+            // returns `Some(Deny)` with no decider when the approver is missing,
+            // unreachable, silent, or timed out, and a direct channel timeout does the
+            // same. Those are runtime denials wearing an operator's clothes. Nor does
+            // `decided_by.is_none()` work, since a single non-fan-out channel leaves
+            // that `None` for a real human answer.
+            let unanswerable = attributed
+                .as_ref()
+                .map(|a| a.source.is_runtime_fail_closed())
+                .unwrap_or(true);
             let decision = match attributed.map(|a| a.response) {
                 Some(zeroclaw_api::channel::ChannelApprovalResponse::Approve) => {
                     ApprovalResponse::Yes
@@ -100,12 +109,20 @@ pub(crate) async fn gate_tool_approval(
         mgr.record_decision(tool_name, tool_args, &decision, &decision_channel);
 
         if decision == ApprovalResponse::No {
+            // This string is fed back to the MODEL, so it states the outcome and
+            // stops there. It deliberately does not name the settings that would
+            // permit the call: `auto_approve` bypasses operator approval for that
+            // tool and `level = "full"` removes approval gates for every tool and
+            // drops workspace-only confinement. Putting that remedy in front of the
+            // model invites it to argue for expanding its own privileges, which is a
+            // disproportionate response to an approval channel being unavailable.
+            // Operators get the actionable advice through the WARN record below and
+            // the UI, where changing policy is actually their decision to make.
             let denied = if unanswerable {
                 format!(
-                    "Tool call not executed: '{tool_name}' requires approval, but this run is \
-                     non-interactive and no connected channel can answer an approval request. \
-                     No operator was asked. Add '{tool_name}' to the agent risk profile's \
-                     `auto_approve` (or set `level = \"full\"`) to allow it here."
+                    "Tool call not executed: '{tool_name}' requires approval and no operator \
+                     decision was available, so the runtime denied it by policy. This was not \
+                     a user's decision."
                 )
             } else {
                 "Denied by user.".to_string()
@@ -122,6 +139,20 @@ pub(crate) async fn gate_tool_approval(
                         "arguments": scrub_credentials(&tool_args.to_string()),
                         "result": denied,
                         "trace_id": ctx.turn_id,
+                        // Operator-facing only. The remedy lives here rather than
+                        // in `result`, which is shown to the model: deciding to
+                        // relax an approval policy is the operator's call, and
+                        // putting the option in front of the model would invite it
+                        // to lobby for its own privilege expansion.
+                        "denied_by_runtime": unanswerable,
+                        "operator_hint": if unanswerable {
+                            Some("No operator could be asked. Check that an approval-capable \
+                                  channel is connected and that the agent's approval route names \
+                                  a registered, reachable approver. If this tool should run \
+                                  unattended, review the agent's risk profile deliberately.")
+                        } else {
+                            None
+                        },
                     })),
                 "tool_call_result"
             );

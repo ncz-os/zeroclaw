@@ -97,6 +97,48 @@ pub enum ChannelApprovalResponse {
 pub struct AttributedApprovalResponse {
     pub response: ChannelApprovalResponse,
     pub decided_by: Option<String>,
+    /// WHO produced this response — an operator, or the runtime failing closed.
+    ///
+    /// This cannot be inferred from the other two fields, which is why it is
+    /// carried explicitly:
+    ///
+    /// * `Option::is_none()` on the whole response does not work, because a
+    ///   fail-closed route returns `Some(Deny)` with no decider.
+    /// * `decided_by.is_none()` does not work either, because a single
+    ///   (non-fan-out) channel leaves it `None` for a genuine operator answer.
+    ///
+    /// Conflating the two produced a tool result that told the model
+    /// "Denied by user." on runs where no human was ever asked.
+    pub source: ApprovalSource,
+}
+
+/// Who decided an approval outcome.
+///
+/// Everything other than [`ApprovalSource::Operator`] is the runtime denying on
+/// its own authority. Callers reporting a denial to a model must distinguish
+/// them: an operator's "no" is a decision, while the rest are the absence of
+/// one, and telling a model a human refused when none was asked sends it
+/// looking for a decision that never happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalSource {
+    /// A human answered through a channel.
+    Operator,
+    /// No approval-capable channel was available: none connected, or the
+    /// channel does not implement approval prompts.
+    Unavailable,
+    /// An approver was configured but could not be reached, errored, or
+    /// returned no decision.
+    Unreachable,
+    /// An approver was reachable but did not answer within the route's budget.
+    TimedOut,
+}
+
+impl ApprovalSource {
+    /// True when the runtime produced this outcome itself, so no operator
+    /// decision exists to report.
+    pub fn is_runtime_fail_closed(self) -> bool {
+        !matches!(self, ApprovalSource::Operator)
+    }
 }
 
 /// A long-lived, channel-agnostic gate prompt (e.g. a parked SOP approval):
@@ -776,6 +818,11 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
             .map(|response| AttributedApprovalResponse {
                 response,
                 decided_by: None,
+                // A plain channel only returns `Some` when it actually got an
+                // answer back from a person, so this path is always an operator
+                // decision. Routes that fail closed synthesize their own
+                // response and set the corresponding runtime source instead.
+                source: ApprovalSource::Operator,
             }))
     }
 

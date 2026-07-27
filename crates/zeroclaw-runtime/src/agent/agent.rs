@@ -94,12 +94,20 @@ pub fn tool_dispatcher_for_provider(
     }
 }
 
+// Debug so a failing routing assertion can print which variant and which
+// source it actually got; without it the test just says "assertion failed".
+#[derive(Debug)]
 pub(crate) enum RoutedApproval {
     /// Use this response. `decider` names the channel that answered, for audit
     /// attribution; `None` for a bridge-synthesized fail-closed deny.
+    ///
+    /// `source` says whether a human actually decided. `decider` cannot answer
+    /// that on its own: it is also `None` when a single non-fan-out channel
+    /// relays a real operator answer.
     Decided {
         response: zeroclaw_api::channel::ChannelApprovalResponse,
         decider: Option<String>,
+        source: zeroclaw_api::channel::ApprovalSource,
     },
     /// Explicit `InheritOriginator` — defer to the originating-channel fan-out.
     Fallthrough,
@@ -117,22 +125,39 @@ pub(crate) async fn resolve_routed_approval(
         .find(|(name, _)| name.as_str() == route.approver_channel)
         .map(|(name, channel)| (name.clone(), Arc::clone(channel)));
 
-    let reason: &str = if let Some((channel_name, channel)) = approver {
-        let dur = std::time::Duration::from_secs(route.timeout_secs.max(1));
-        match tokio::time::timeout(dur, channel.request_approval(recipient, request)).await {
-            Ok(Ok(Some(response))) => {
-                return RoutedApproval::Decided {
-                    response,
-                    decider: Some(channel_name),
-                };
+    // `source` is tracked alongside `reason` so the fail-closed deny below can
+    // say WHY no operator decided, rather than leaving the caller to guess from
+    // a missing decider.
+    let (reason, source): (&str, zeroclaw_api::channel::ApprovalSource) =
+        if let Some((channel_name, channel)) = approver {
+            let dur = std::time::Duration::from_secs(route.timeout_secs.max(1));
+            match tokio::time::timeout(dur, channel.request_approval(recipient, request)).await {
+                Ok(Ok(Some(response))) => {
+                    return RoutedApproval::Decided {
+                        response,
+                        decider: Some(channel_name),
+                        source: zeroclaw_api::channel::ApprovalSource::Operator,
+                    };
+                }
+                Ok(Ok(None)) => (
+                    "approver returned no decision",
+                    zeroclaw_api::channel::ApprovalSource::Unreachable,
+                ),
+                Ok(Err(_)) => (
+                    "approver channel unreachable",
+                    zeroclaw_api::channel::ApprovalSource::Unreachable,
+                ),
+                Err(_) => (
+                    "approver timed out",
+                    zeroclaw_api::channel::ApprovalSource::TimedOut,
+                ),
             }
-            Ok(Ok(None)) => "approver returned no decision",
-            Ok(Err(_)) => "approver channel unreachable",
-            Err(_) => "approver timed out",
-        }
-    } else {
-        "approver channel not registered"
-    };
+        } else {
+            (
+                "approver channel not registered",
+                zeroclaw_api::channel::ApprovalSource::Unavailable,
+            )
+        };
 
     match route.on_no_approver {
         zeroclaw_config::autonomy::OnNoApprover::Deny => {
@@ -151,6 +176,10 @@ pub(crate) async fn resolve_routed_approval(
             RoutedApproval::Decided {
                 response: zeroclaw_api::channel::ChannelApprovalResponse::Deny,
                 decider: None,
+                // The runtime denied this, not a person. Carrying the specific
+                // reason lets the tool result say so instead of reporting a
+                // user denial that never happened.
+                source,
             }
         }
         zeroclaw_config::autonomy::OnNoApprover::InheritOriginator => {
@@ -233,12 +262,15 @@ impl zeroclaw_api::channel::Channel for RoutedApprovalChannel {
         match resolve_routed_approval(&self.handles, &self.route, recipient, request).await {
             // The deciding approver's name travels on the response itself;
             // `None` for a bridge-synthesized fail-closed deny.
-            RoutedApproval::Decided { response, decider } => {
-                Ok(Some(zeroclaw_api::channel::AttributedApprovalResponse {
-                    response,
-                    decided_by: decider,
-                }))
-            }
+            RoutedApproval::Decided {
+                response,
+                decider,
+                source,
+            } => Ok(Some(zeroclaw_api::channel::AttributedApprovalResponse {
+                response,
+                decided_by: decider,
+                source,
+            })),
             // No originating channel to inherit on this path; let the gate apply
             // the non-interactive default (auto-deny).
             RoutedApproval::Fallthrough => Ok(None),
@@ -9487,12 +9519,21 @@ mod approval_route_tests {
             behavior: StubBehavior::Answer(ChannelApprovalResponse::Approve),
         }]);
         match resolve_routed_approval(&h, &route("ops", OnNoApprover::Deny), "r", &req()).await {
-            RoutedApproval::Decided { response, decider } => {
+            RoutedApproval::Decided {
+                response,
+                decider,
+                source,
+            } => {
                 assert_eq!(response, ChannelApprovalResponse::Approve);
                 assert_eq!(
                     decider.as_deref(),
                     Some("ops"),
                     "decider names the approver"
+                );
+                assert_eq!(
+                    source,
+                    zeroclaw_api::channel::ApprovalSource::Operator,
+                    "an approver's answer is an operator decision"
                 );
             }
             RoutedApproval::Fallthrough => panic!("expected a routed decision"),
@@ -9503,9 +9544,22 @@ mod approval_route_tests {
     async fn unregistered_approver_fails_closed_by_default() {
         let h = registry(vec![]);
         match resolve_routed_approval(&h, &route("ops", OnNoApprover::Deny), "r", &req()).await {
-            RoutedApproval::Decided { response, decider } => {
+            RoutedApproval::Decided {
+                response,
+                decider,
+                source,
+            } => {
                 assert_eq!(response, ChannelApprovalResponse::Deny, "fail-closed deny");
                 assert!(decider.is_none(), "synthetic deny has no decider");
+                // The regression this guards: a fail-closed deny is Some(Deny)
+                // with no decider, so anything inferring "a user decided" from
+                // the presence of a response reports a denial nobody made.
+                assert_eq!(
+                    source,
+                    zeroclaw_api::channel::ApprovalSource::Unavailable,
+                    "an unregistered approver is a runtime denial, not a user's"
+                );
+                assert!(source.is_runtime_fail_closed());
             }
             RoutedApproval::Fallthrough => panic!("default policy must NOT fall through"),
         }
@@ -9534,13 +9588,17 @@ mod approval_route_tests {
             behavior: StubBehavior::NoDecision,
         }]);
         let out = resolve_routed_approval(&h, &route("ops", OnNoApprover::Deny), "r", &req()).await;
-        assert!(matches!(
-            out,
-            RoutedApproval::Decided {
-                response: ChannelApprovalResponse::Deny,
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                out,
+                RoutedApproval::Decided {
+                    response: ChannelApprovalResponse::Deny,
+                    source: zeroclaw_api::channel::ApprovalSource::Unreachable,
+                    ..
+                }
+            ),
+            "an approver that returns no decision is a runtime denial: {out:?}"
+        );
     }
 
     // The route timeout (1s) fires and cancels the stub's long sleep, so this
@@ -9552,13 +9610,19 @@ mod approval_route_tests {
             behavior: StubBehavior::Slow,
         }]);
         let out = resolve_routed_approval(&h, &route("ops", OnNoApprover::Deny), "r", &req()).await;
-        assert!(matches!(
-            out,
-            RoutedApproval::Decided {
-                response: ChannelApprovalResponse::Deny,
-                ..
-            }
-        ));
+        // A timeout is the case most easily mistaken for a user's "no": the
+        // route returns Some(Deny) exactly as an operator denial would.
+        assert!(
+            matches!(
+                out,
+                RoutedApproval::Decided {
+                    response: ChannelApprovalResponse::Deny,
+                    source: zeroclaw_api::channel::ApprovalSource::TimedOut,
+                    ..
+                }
+            ),
+            "a timed-out approver is a runtime denial, not a user's: {out:?}"
+        );
     }
 
     use zeroclaw_api::channel::Channel as _;
