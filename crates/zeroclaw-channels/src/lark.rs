@@ -2846,11 +2846,24 @@ impl Channel for LarkChannel {
         }
     }
 
+    /// Delegates to [`Self::request_approval_attributed`] and drops the
+    /// provenance, so the prompt/timeout logic lives in exactly one place.
     async fn request_approval(
         &self,
         recipient: &str,
         request: &zeroclaw_api::channel::ChannelApprovalRequest,
     ) -> anyhow::Result<Option<zeroclaw_api::channel::ChannelApprovalResponse>> {
+        Ok(self
+            .request_approval_attributed(recipient, request)
+            .await?
+            .map(|attributed| attributed.response))
+    }
+
+    async fn request_approval_attributed(
+        &self,
+        recipient: &str,
+        request: &zeroclaw_api::channel::ChannelApprovalRequest,
+    ) -> anyhow::Result<Option<zeroclaw_api::channel::AttributedApprovalResponse>> {
         let approval_id = Uuid::new_v4().to_string();
         let card =
             build_approval_card(&approval_id, &request.tool_name, &request.arguments_summary);
@@ -3171,17 +3184,32 @@ impl LarkChannel {
 impl LarkChannel {
     /// Wait for the user's approval click; on timeout, evict the pending entry
     /// and synthesize a `Deny` response. Never panics.
+    ///
+    /// The returned provenance separates a real click from the synthesized
+    /// deny, so the caller does not report an operator refusal nobody made.
     async fn wait_for_decision(
         &self,
         rx: tokio::sync::oneshot::Receiver<zeroclaw_api::channel::ChannelApprovalResponse>,
         approval_id: &str,
-    ) -> zeroclaw_api::channel::ChannelApprovalResponse {
-        use zeroclaw_api::channel::ChannelApprovalResponse;
+    ) -> zeroclaw_api::channel::AttributedApprovalResponse {
+        use zeroclaw_api::channel::{
+            ApprovalSource, AttributedApprovalResponse, ChannelApprovalResponse,
+        };
         match tokio::time::timeout(Duration::from_secs(self.approval_timeout_secs), rx).await {
-            Ok(Ok(response)) => response,
-            _ => {
+            Ok(Ok(response)) => AttributedApprovalResponse::operator(response),
+            Ok(Err(_)) => {
                 self.pending_approvals.lock().await.remove(approval_id);
-                ChannelApprovalResponse::Deny
+                AttributedApprovalResponse::from_runtime(
+                    ChannelApprovalResponse::Deny,
+                    ApprovalSource::Unreachable,
+                )
+            }
+            Err(_) => {
+                self.pending_approvals.lock().await.remove(approval_id);
+                AttributedApprovalResponse::from_runtime(
+                    ChannelApprovalResponse::Deny,
+                    ApprovalSource::TimedOut,
+                )
             }
         }
     }

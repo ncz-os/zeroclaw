@@ -131,12 +131,18 @@ pub(crate) async fn resolve_routed_approval(
     let (reason, source): (&str, zeroclaw_api::channel::ApprovalSource) =
         if let Some((channel_name, channel)) = approver {
             let dur = std::time::Duration::from_secs(route.timeout_secs.max(1));
-            match tokio::time::timeout(dur, channel.request_approval(recipient, request)).await {
-                Ok(Ok(Some(response))) => {
+            // Attributed, not legacy: if the approver channel synthesizes its own
+            // `Some(Deny)` (its inner timeout firing before this outer one), that
+            // is a runtime denial and must not be relabelled as the approver's
+            // decision just because a response came back.
+            match tokio::time::timeout(dur, channel.request_approval_attributed(recipient, request))
+                .await
+            {
+                Ok(Ok(Some(attributed))) => {
                     return RoutedApproval::Decided {
-                        response,
+                        response: attributed.response,
                         decider: Some(channel_name),
-                        source: zeroclaw_api::channel::ApprovalSource::Operator,
+                        source: attributed.source,
                     };
                 }
                 Ok(Ok(None)) => (
