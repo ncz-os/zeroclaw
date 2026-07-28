@@ -383,6 +383,11 @@ fn starts_with_tool_protocol_tag_or_fence(text: &str) -> bool {
     lower.starts_with("<tool_call")
         || lower.starts_with("<toolcall")
         || lower.starts_with("<tool-call")
+        // `<tools>` only, not a `<tools` prefix: the prefix would also swallow
+        // `<toolsomething>`, and unlike the aliases above this tag has a second
+        // legitimate meaning (the Hermes tool *declaration* block), so it is
+        // matched exactly and left to the example-guard below.
+        || lower.starts_with("<tools>")
         || lower.starts_with("<invoke")
         || lower.starts_with("<functioncall")
         || lower.starts_with("<function_call")
@@ -415,6 +420,7 @@ fn contains_tool_protocol_tag_marker(text: &str) -> bool {
     lower.contains("<tool_call")
         || lower.contains("<toolcall")
         || lower.contains("<tool-call")
+        || lower.contains("<tools>")
         || lower.contains("<invoke")
         || lower.contains("<functioncall")
         || lower.contains("<function_call")
@@ -917,21 +923,26 @@ fn parse_minimax_invoke_calls(response: &str) -> Option<(String, Vec<ParsedToolC
     Some((text, calls))
 }
 
-const TOOL_CALL_OPEN_TAGS: [&str; 7] = [
+const TOOL_CALL_OPEN_TAGS: [&str; 8] = [
     "<tool_call>",
     "<tool_calls>",
     "<toolcall>",
     "<tool-call>",
+    // Hermes-family models sometimes emit the tool *declaration* tag around an
+    // invocation. Qwen2.5-Coder-32B does this deterministically: the payload is
+    // well-formed Hermes JSON, only the wrapper is wrong.
+    "<tools>",
     "<invoke>",
     "<minimax:tool_call>",
     "<minimax:toolcall>",
 ];
 
-const TOOL_CALL_CLOSE_TAGS: [&str; 7] = [
+const TOOL_CALL_CLOSE_TAGS: [&str; 8] = [
     "</tool_call>",
     "</tool_calls>",
     "</toolcall>",
     "</tool-call>",
+    "</tools>",
     "</invoke>",
     "</minimax:tool_call>",
     "</minimax:toolcall>",
@@ -1160,6 +1171,7 @@ fn file_write_content_tail_is_unambiguous(input: &str, after_quote: usize) -> bo
     tail.is_empty()
         || tail.starts_with("</tool_call>")
         || tail.starts_with("</tool_calls>")
+        || tail.starts_with("</tools>")
         || tail.starts_with("</toolcall>")
         || tail.starts_with("</tool-call>")
         || tail.starts_with("</invoke>")
@@ -1750,6 +1762,38 @@ fn malformed_tool_block_event(payload_len: usize) -> ::zeroclaw_log::Event {
         }))
 }
 
+/// Is this JSON value an *invocation* rather than a tool *declaration*?
+///
+/// Only consulted for the `<tools>` wrapper, which is overloaded: in the Hermes
+/// prompt format `<tools>` DECLARES the available tools, while `<tool_call>`
+/// invokes one. Every other alias in [`TOOL_CALL_OPEN_TAGS`] has exactly one
+/// meaning, so this narrowing does not apply to them.
+///
+/// The distinction cannot be left to [`has_arguments_signal`], which counts
+/// `parameters` as an arguments marker: a declaration carries `name` +
+/// `parameters` and is therefore indistinguishable from a call by that test.
+/// A declaration is rejected here on three signals a real invocation never has
+/// -- a JSON array of entries, a `description`, or a `parameters` schema in
+/// place of concrete `arguments`.
+fn looks_like_tools_wrapper_invocation(value: &serde_json::Value) -> bool {
+    // A declaration block is an ARRAY of tool schemas. An invocation is one call.
+    let serde_json::Value::Object(map) = value else {
+        return false;
+    };
+    // `description` and `parameters` describe a tool; they never appear in a call.
+    if map.contains_key("description") || map.contains_key("parameters") {
+        return false;
+    }
+    // OpenAI-shaped `{"type":"function","function":{...}}` declarations.
+    if let Some(inner) = map.get("function").and_then(serde_json::Value::as_object)
+        && (inner.contains_key("description") || inner.contains_key("parameters"))
+    {
+        return false;
+    }
+    has_non_empty_string(value, "name")
+        && (map.contains_key("arguments") || map.contains_key("args"))
+}
+
 pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
     // Strip `<think>...</think>` blocks before parsing.  Qwen and other
     // reasoning models embed chain-of-thought inline in the response text;
@@ -1799,6 +1843,7 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             "<tool_calls>" => Some("</tool_calls>"),
             "<toolcall>" => Some("</toolcall>"),
             "<tool-call>" => Some("</tool-call>"),
+            "<tools>" => Some("</tools>"),
             "<invoke>" => Some("</invoke>"),
             "<minimax:tool_call>" => Some("</minimax:tool_call>"),
             "<minimax:toolcall>" => Some("</minimax:toolcall>"),
@@ -1815,6 +1860,13 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             // Try JSON format first
             let json_values = extract_json_values(inner);
             for value in json_values {
+                // `<tools>` is the only overloaded wrapper: it is also the tag
+                // that declares the available tools. Accept it ONLY when the
+                // body is invocation-shaped, so a declaration block, an echoed
+                // system prompt, or prose explaining the format stays inert.
+                if open_tag == "<tools>" && !looks_like_tools_wrapper_invocation(&value) {
+                    continue;
+                }
                 let parsed_calls = parse_tool_calls_from_json_value(&value);
                 if !parsed_calls.is_empty() {
                     parsed_any = true;
@@ -2940,6 +2992,78 @@ Done."#;
         assert_eq!(
             calls[0].arguments.get("command").unwrap().as_str().unwrap(),
             "date"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_tools_tag_alias() {
+        // Qwen2.5-Coder-32B wraps a well-formed Hermes call in the tool
+        // *declaration* tag rather than the invocation tag. Observed
+        // deterministically (6/6 across two independent runs, and independent
+        // of how many tools are offered), so the call is recoverable and should
+        // not be dropped as prose.
+        let response = r#"<tools>
+{"name": "get_weather", "arguments": {"city": "Paris"}}
+</tools>"#;
+
+        let (text, calls) = parse_tool_calls(response);
+        assert!(text.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(
+            calls[0].arguments.get("city").unwrap().as_str().unwrap(),
+            "Paris"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_declaration_block() {
+        // `<tools>` is ALSO the Hermes tag that DECLARES the available tools.
+        // A declaration is an array of schemas -- `description` / `parameters`,
+        // no `arguments` -- and must never be executed as an invocation.
+        let response = r#"<tools>
+[{"name": "get_weather", "description": "Get the current weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]
+</tools>"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "a tool DECLARATION must not be parsed as an invocation, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_block_discussed_in_prose() {
+        // An assistant explaining the Hermes format must not trigger a call.
+        let response = r#"In the Hermes prompt format the available tools are declared like this:
+
+<tools>
+[{"name": "shell", "description": "Run a command", "parameters": {}}]
+</tools>
+
+and the model then replies with a <tool_call> block."#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "prose describing the format must not be parsed as an invocation, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_echoed_system_prompt_tools_block() {
+        // Some models echo their own system prompt. That echo contains the
+        // declaration block verbatim and must stay inert.
+        let response = r#"You are a helpful assistant with access to the following functions.
+<tools>
+[{"type": "function", "function": {"name": "file_read", "description": "Read a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}]
+</tools>
+Use them when appropriate."#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "an echoed system prompt must not be parsed as an invocation, got {calls:?}"
         );
     }
 
