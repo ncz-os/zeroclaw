@@ -68,17 +68,18 @@ impl Channel for AskUserApprovalBridge {
     ) -> anyhow::Result<Option<AttributedApprovalResponse>> {
         if let Some(route) = &self.route {
             match resolve_routed_approval(&self.handles, route, recipient, request).await {
+                // Cross-crate construction: `AttributedApprovalResponse` is
+                // `#[non_exhaustive]`, so struct-literal syntax is forbidden
+                // from here. Build via the dedicated constructors.
                 RoutedApproval::Decided {
                     response,
                     decider,
                     source,
                 } => {
-                    return Ok(Some(AttributedApprovalResponse {
-                        response,
-                        decided_by: decider,
-                        source,
-                        ..Default::default()
-                    }));
+                    return Ok(Some(
+                        AttributedApprovalResponse::from_runtime(response, source)
+                            .with_decider_opt(decider),
+                    ));
                 }
                 RoutedApproval::Fallthrough => {
                     // explicit InheritOriginator → originating fan-out below

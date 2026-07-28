@@ -268,16 +268,18 @@ impl zeroclaw_api::channel::Channel for RoutedApprovalChannel {
         match resolve_routed_approval(&self.handles, &self.route, recipient, request).await {
             // The deciding approver's name travels on the response itself;
             // `None` for a bridge-synthesized fail-closed deny.
+            //
+            // Cross-crate construction: `AttributedApprovalResponse` is
+            // `#[non_exhaustive]`, so struct-literal syntax is forbidden from
+            // here. Build via the dedicated constructors.
             RoutedApproval::Decided {
                 response,
                 decider,
                 source,
-            } => Ok(Some(zeroclaw_api::channel::AttributedApprovalResponse {
-                response,
-                decided_by: decider,
-                source,
-                ..Default::default()
-            })),
+            } => Ok(Some(
+                zeroclaw_api::channel::AttributedApprovalResponse::from_runtime(response, source)
+                    .with_decider_opt(decider),
+            )),
             // No originating channel to inherit on this path; let the gate apply
             // the non-interactive default (auto-deny).
             RoutedApproval::Fallthrough => Ok(None),
