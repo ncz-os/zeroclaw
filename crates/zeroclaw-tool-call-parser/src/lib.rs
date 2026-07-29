@@ -1790,8 +1790,26 @@ fn looks_like_tools_wrapper_invocation(value: &serde_json::Value) -> bool {
     {
         return false;
     }
-    has_non_empty_string(value, "name")
-        && (map.contains_key("arguments") || map.contains_key("args"))
+    // Only `arguments` is admitted. `args` was accepted here previously, but the
+    // canonical parser reads `arguments`/`parameters` and never `args`, so an
+    // `args`-only body was admitted as an invocation and then dispatched with
+    // EMPTY arguments -- a corrupted call rather than an inert one. Admitting a
+    // shape the parser cannot honour is worse than not admitting it: if a model
+    // is found to emit `args`, implement it in the canonical parser first.
+    has_non_empty_string(value, "name") && map.contains_key("arguments")
+}
+
+/// Single policy point for the overloaded `<tools>` wrapper.
+///
+/// `<tools>` is both the tag that DECLARES available tools and, for some models,
+/// the tag that wraps an invocation. Every recovery path that turns a `<tools>`
+/// body into a call must consult this, or malformed closing syntax silently
+/// becomes a way to promote a declaration into an invocation. The guard
+/// previously lived only on the matching-`</tools>` path, leaving the
+/// cross-alias and unclosed-tag recovery paths able to parse an echoed
+/// declaration as a call.
+fn tools_wrapper_admits(open_tag: &str, value: &serde_json::Value) -> bool {
+    open_tag != "<tools>" || looks_like_tools_wrapper_invocation(value)
 }
 
 pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
@@ -1864,7 +1882,7 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 // that declares the available tools. Accept it ONLY when the
                 // body is invocation-shaped, so a declaration block, an echoed
                 // system prompt, or prose explaining the format stays inert.
-                if open_tag == "<tools>" && !looks_like_tools_wrapper_invocation(&value) {
+                if !tools_wrapper_admits(open_tag, &value) {
                     continue;
                 }
                 let parsed_calls = parse_tool_calls_from_json_value(&value);
@@ -1915,6 +1933,11 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 // Try JSON
                 let json_values = extract_json_values(inner);
                 for value in json_values {
+                    // Mismatched close: a declaration closed by a foreign alias
+                    // must not become a call.
+                    if !tools_wrapper_admits(open_tag, &value) {
+                        continue;
+                    }
                     let parsed_calls = parse_tool_calls_from_json_value(&value);
                     if !parsed_calls.is_empty() {
                         parsed_any = true;
@@ -1954,6 +1977,8 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             if let Some(json_end) = find_json_end(after_open)
                 && let Ok(value) =
                     serde_json::from_str::<serde_json::Value>(&after_open[..json_end])
+                // Missing close: truncation must not promote a declaration either.
+                && tools_wrapper_admits(open_tag, &value)
             {
                 let parsed_calls = parse_tool_calls_from_json_value(&value);
                 if !parsed_calls.is_empty() {
@@ -1963,7 +1988,9 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 }
             }
 
-            if let Some((value, consumed_end)) = extract_first_json_value_with_end(after_open) {
+            if let Some((value, consumed_end)) = extract_first_json_value_with_end(after_open)
+                && tools_wrapper_admits(open_tag, &value)
+            {
                 let parsed_calls = parse_tool_calls_from_json_value(&value);
                 if !parsed_calls.is_empty() {
                     calls.extend(parsed_calls);
@@ -3064,6 +3091,72 @@ Use them when appropriate."#;
         assert!(
             calls.is_empty(),
             "an echoed system prompt must not be parsed as an invocation, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_declaration_closed_by_foreign_alias() {
+        // Mismatched close. The cross-alias recovery path used to parse this
+        // body without consulting the <tools> guard, so closing a declaration
+        // with a FOREIGN alias was enough to turn it into a call.
+        let response = r#"<tools>
+[{"name": "shell", "description": "Run a command", "parameters": {}}]
+</tool_call>"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "a declaration closed by a foreign alias must stay inert, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_unclosed_tools_declaration() {
+        // Missing close. Truncation mid-stream reaches the brace-balancing
+        // recovery path, which was likewise unguarded.
+        let response = r#"<tools>
+[{"name": "shell", "description": "Run a command", "parameters": {}}]"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "an unclosed declaration must stay inert, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_rejects_tools_wrapper_with_args_key() {
+        // `args` is not the canonical key: the parser reads `arguments`. When
+        // the admission predicate accepted `args`, this was admitted as an
+        // invocation and then dispatched with EMPTY arguments -- the runtime
+        // received a different call from the one the model encoded. Staying
+        // inert is correct; a corrupted call is not.
+        let response = r#"<tools>
+{"name": "shell", "args": {"command": "rm -rf /tmp/x"}}
+</tools>"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "an `args`-shaped body must not be dispatched with empty arguments, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_still_accepts_canonical_tools_invocation() {
+        // Positive control: the motivating Qwen payload must keep working, so
+        // the guards above cannot be satisfied by simply rejecting everything.
+        let response = r#"<tools>
+{"name": "shell", "arguments": {"command": "uname -a"}}
+</tools>"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1, "canonical invocation must still parse");
+        assert_eq!(calls[0].name, "shell");
+        assert!(
+            calls[0].arguments.get("command").is_some(),
+            "arguments must be preserved, got {:?}",
+            calls[0].arguments
         );
     }
 
