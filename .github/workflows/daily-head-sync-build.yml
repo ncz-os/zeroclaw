@@ -87,7 +87,22 @@ jobs:
 
   build-head:
     needs: sync
-    runs-on: ubuntu-latest
+    # TWO LINUX TARGETS, NO DARWIN BUILD. Macs are served by the aarch64 Linux
+    # binary inside podman/docker, so a native macOS build would be dead weight:
+    # an extra runner, an extra toolchain and an extra artifact nobody consumes.
+    # ubuntu-24.04-arm is a native arm64 runner (free on public repos), which
+    # avoids cross-compilation and the linker/sysroot problems that come with it.
+    strategy:
+      fail-fast: false          # one arch failing must not hide the other's result
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -96,31 +111,44 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.1"          # matches the workspace rust-version
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
 
       # Build HEAD every day even when nothing changed. A build that only runs on
       # change cannot tell you that yesterday's HEAD still builds today with a
       # refreshed dependency graph -- which is how a green project turns red
       # without a single commit landing.
       - name: Build release binary from HEAD
-        run: cargo build --release --locked --bin zeroclaw
+        run: cargo build --release --locked --bin zeroclaw --target ${{ matrix.target }}
 
-      - name: Record provenance
+      - name: Stage artifact with provenance
         id: prov
         run: |
           set -euo pipefail
           SHA=$(git rev-parse HEAD)
-          echo "$SHA" > GIT_COMMIT
+          BIN=target/${{ matrix.target }}/release/zeroclaw
+          test -x "$BIN"
+          # Arch-suffixed so the two matrix legs cannot overwrite each other in
+          # the shared release -- an unsuffixed name silently keeps whichever
+          # job finished last.
+          cp "$BIN" "zeroclaw-${{ matrix.arch }}-linux"
+          echo "$SHA" > "GIT_COMMIT-${{ matrix.arch }}"
           {
             echo "commit=$SHA"
+            echo "arch=${{ matrix.arch }}"
+            echo "target=${{ matrix.target }}"
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "upstream=zeroclaw-labs/zeroclaw"
-          } > BUILD_INFO
+            echo "toolchain=1.96.1"
+          } > "BUILD_INFO-${{ matrix.arch }}"
           echo "sha_short=${SHA:0:10}" >> "$GITHUB_OUTPUT"
           echo "stamp=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          ls -la "zeroclaw-${{ matrix.arch }}-linux"
 
-      - name: Publish rolling HEAD release
+      - name: Publish into the rolling HEAD release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: head-${{ steps.prov.outputs.stamp }}
@@ -129,13 +157,24 @@ jobs:
             Daily build of upstream HEAD, tracked for fleet distribution.
 
             * commit: `${{ steps.prov.outputs.sha_short }}`
-            * source: zeroclaw-labs/zeroclaw master, fast-forwarded into this fork
+            * source: zeroclaw-labs/zeroclaw master, mirrored to `upstream-head`
             * toolchain: 1.96.1, `cargo build --release --locked`
 
-            This is an untriaged upstream build, not a curated release. It exists so
-            that drift between this fork and upstream surfaces the day it happens.
+            **Targets**
+
+            | asset | for |
+            |---|---|
+            | `zeroclaw-x86_64-linux`  | TYPHON, PROTEUS, ACHILLES, forge workers |
+            | `zeroclaw-aarch64-linux` | TYDEUS, bigpi, clawpi — and macOS hosts via podman/docker |
+
+            There is deliberately no macOS binary: Macs run the aarch64 Linux
+            build in a container, so a native Darwin artifact would be one more
+            thing to build and nothing to consume it.
+
+            These are untriaged upstream builds, not curated releases. They exist
+            so drift between this fork and upstream surfaces the day it happens.
           files: |
-            target/release/zeroclaw
-            GIT_COMMIT
-            BUILD_INFO
+            zeroclaw-${{ matrix.arch }}-linux
+            GIT_COMMIT-${{ matrix.arch }}
+            BUILD_INFO-${{ matrix.arch }}
           fail_on_unmatched_files: true
