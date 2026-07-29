@@ -1,0 +1,141 @@
+name: Daily HEAD sync and build
+
+# WHY THIS EXISTS
+# ncz-os/zeroclaw is a FORK of zeroclaw-labs/zeroclaw. zoder needs no sync step
+# because it is our own project; this repo does, and it never had one. The
+# fork-sync cron on ULTRA was disabled on 2026-06-28 when the perlowja fork was
+# retired and was never repointed here, so master silently fell 73 commits / 8
+# days behind upstream while the fleet consumed nightly assets built from it.
+#
+# BRANCH MODEL -- this matters, and it is why the sync does not touch master.
+#   master        our fork's branch: upstream code PLUS this CI overlay
+#   upstream-head a PURE mirror of zeroclaw-labs/zeroclaw master, no local commits
+#
+# The daily job fast-forwards `upstream-head` and builds THAT. Keeping the mirror
+# separate means the sync is always a clean fast-forward and never needs a force
+# push, so a local commit on master can never be silently destroyed. Syncing into
+# master directly would have required force-pushing over our own CI commit -- the
+# exact failure mode that killed the previous fork-sync arrangement.
+#
+# It builds every day even when nothing changed: a build that only runs on change
+# cannot tell you yesterday's HEAD went red today from a refreshed dependency
+# graph.
+
+on:
+  schedule:
+    - cron: "0 8 * * *"      # 08:00 UTC, an hour before zoder's nightly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-head
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.ff.outputs.sha }}
+      changed: ${{ steps.ff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fast-forward the upstream-head mirror
+        id: ff
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/zeroclaw-labs/zeroclaw.git
+          git fetch upstream master --tags
+          # Seed the mirror on first run; thereafter only ever fast-forward it.
+          if git ls-remote --exit-code --heads origin upstream-head >/dev/null 2>&1; then
+            git fetch origin upstream-head:upstream-head
+          else
+            git branch upstream-head upstream/master
+          fi
+          git checkout upstream-head
+          BEFORE=$(git rev-parse HEAD)
+          UP=$(git rev-parse upstream/master)
+          echo "fork:     $BEFORE"
+          echo "upstream: $UP"
+
+          if [ "$BEFORE" = "$UP" ]; then
+            echo "already current"
+            echo "sha=$UP" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Refuse to force. If the fork has commits upstream does not, a
+          # fast-forward would destroy them and that must be a human decision.
+          AHEAD=$(git rev-list --count upstream/master..HEAD)
+          if [ "$AHEAD" != "0" ]; then
+            echo "::error::upstream-head has $AHEAD commit(s) not in upstream; refusing to force-sync"
+            git log --oneline upstream/master..HEAD
+            exit 1
+          fi
+
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          echo "::notice::fast-forwarding $BEHIND commit(s) to $UP"
+          git merge --ff-only upstream/master
+          git push origin upstream-head
+          echo "sha=$UP" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+  build-head:
+    needs: sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.1"          # matches the workspace rust-version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Build HEAD every day even when nothing changed. A build that only runs on
+      # change cannot tell you that yesterday's HEAD still builds today with a
+      # refreshed dependency graph -- which is how a green project turns red
+      # without a single commit landing.
+      - name: Build release binary from HEAD
+        run: cargo build --release --locked --bin zeroclaw
+
+      - name: Record provenance
+        id: prov
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          echo "$SHA" > GIT_COMMIT
+          {
+            echo "commit=$SHA"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "upstream=zeroclaw-labs/zeroclaw"
+          } > BUILD_INFO
+          echo "sha_short=${SHA:0:10}" >> "$GITHUB_OUTPUT"
+          echo "stamp=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling HEAD release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: head-${{ steps.prov.outputs.stamp }}
+          name: "HEAD ${{ steps.prov.outputs.stamp }} (${{ steps.prov.outputs.sha_short }})"
+          body: |
+            Daily build of upstream HEAD, tracked for fleet distribution.
+
+            * commit: `${{ steps.prov.outputs.sha_short }}`
+            * source: zeroclaw-labs/zeroclaw master, fast-forwarded into this fork
+            * toolchain: 1.96.1, `cargo build --release --locked`
+
+            This is an untriaged upstream build, not a curated release. It exists so
+            that drift between this fork and upstream surfaces the day it happens.
+          files: |
+            target/release/zeroclaw
+            GIT_COMMIT
+            BUILD_INFO
+          fail_on_unmatched_files: true
