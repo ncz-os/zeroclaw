@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: daily-head
@@ -148,6 +149,17 @@ jobs:
           echo "stamp=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
           ls -la "zeroclaw-${{ matrix.arch }}-linux"
 
+      # Hand the compiled binary to the image job rather than have the container
+      # recompile from source. The repo Dockerfile is a full multi-stage Rust
+      # build; running it per-platform would compile the workspace twice more
+      # for artifacts we already have.
+      - name: Upload binary for the image job
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroclaw-${{ matrix.arch }}
+          path: zeroclaw-${{ matrix.arch }}-linux
+          retention-days: 1
+
       - name: Publish into the rolling HEAD release
         uses: softprops/action-gh-release@v2
         with:
@@ -178,3 +190,84 @@ jobs:
             GIT_COMMIT-${{ matrix.arch }}
             BUILD_INFO-${{ matrix.arch }}
           fail_on_unmatched_files: true
+
+  publish-image:
+    needs: [sync, build-head]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+
+      - name: Collect both arch binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Lay out a per-platform build context
+        id: ctx
+        run: |
+          set -euo pipefail
+          # buildx resolves $TARGETARCH per platform, so the binaries are staged
+          # under docker's arch names (amd64/arm64), not rust triples.
+          mkdir -p dist/amd64 dist/arm64
+          install -m755 artifacts/zeroclaw-x86_64/zeroclaw-x86_64-linux   dist/amd64/zeroclaw
+          install -m755 artifacts/zeroclaw-aarch64/zeroclaw-aarch64-linux dist/arm64/zeroclaw
+          cat > Containerfile.head <<'DOCKERFILE'
+          # Daily HEAD image. Packages the binaries built by the build-head matrix
+          # instead of recompiling; the source build lives in the repo Dockerfile
+          # and is used for tagged releases.
+          FROM debian:bookworm-slim
+          ARG TARGETARCH
+          ARG ZC_COMMIT
+          RUN apt-get update \
+           && apt-get install -y --no-install-recommends ca-certificates git \
+           && rm -rf /var/lib/apt/lists/*
+          COPY dist/${TARGETARCH}/zeroclaw /usr/local/bin/zeroclaw
+          RUN /usr/local/bin/zeroclaw --version
+          LABEL org.opencontainers.image.source="https://github.com/ncz-os/zeroclaw" \
+                org.opencontainers.image.revision="${ZC_COMMIT}" \
+                org.opencontainers.image.description="Daily build of zeroclaw-labs HEAD (untriaged)"
+          ENTRYPOINT ["/usr/local/bin/zeroclaw"]
+          DOCKERFILE
+          echo "stamp=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          ls -la dist/amd64 dist/arm64
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are namespaced `head-*` on purpose: docker-publish.yml owns the
+      # release tags from dev/ci/docker-tags.toml, and these untriaged daily
+      # builds must never land on one of those.
+      - name: Build and push multi-arch HEAD image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.head
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          build-args: |
+            ZC_COMMIT=${{ needs.sync.outputs.sha }}
+          tags: |
+            ghcr.io/ncz-os/zeroclaw:head
+            ghcr.io/ncz-os/zeroclaw:head-${{ steps.ctx.outputs.stamp }}
+            ghcr.io/ncz-os/zeroclaw:head-${{ needs.sync.outputs.sha }}
+
+      - name: Verify both platforms are in the manifest
+        run: |
+          set -euo pipefail
+          # A multi-arch push that silently produced one platform would look
+          # identical to success from the build step alone.
+          docker buildx imagetools inspect ghcr.io/ncz-os/zeroclaw:head-${{ steps.ctx.outputs.stamp }} \
+            | tee /tmp/manifest.txt
+          for p in linux/amd64 linux/arm64; do
+            grep -q "$p" /tmp/manifest.txt || { echo "::error::$p missing from manifest"; exit 1; }
+          done
+          echo "both platforms present"
