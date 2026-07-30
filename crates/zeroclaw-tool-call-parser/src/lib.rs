@@ -1812,6 +1812,20 @@ fn tools_wrapper_admits(open_tag: &str, value: &serde_json::Value) -> bool {
     open_tag != "<tools>" || looks_like_tools_wrapper_invocation(value)
 }
 
+/// Legacy non-JSON recovery (malformed-file-write, XML, GLM shortened body) is
+/// NOT available under `<tools>`.
+///
+/// `tools_wrapper_admits` can only inspect a value that already parsed as JSON.
+/// The legacy parsers take raw text, so there is nothing for the admission rule
+/// to examine — which left `<tools>shell>rm -rf /tmp/x</tools>` reaching
+/// `parse_glm_shortened_body` and becoming a shell call while never satisfying
+/// the wrapper policy. Since `<tools>` is the overloaded declaration tag, the
+/// narrow rule is that it carries canonical JSON invocations or nothing at all;
+/// the legacy shapes belong to the unambiguous tags.
+fn legacy_fallbacks_allowed(open_tag: &str) -> bool {
+    open_tag != "<tools>"
+}
+
 pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
     // Strip `<think>...</think>` blocks before parsing.  Qwen and other
     // reasoning models embed chain-of-thought inline in the response text;
@@ -1892,20 +1906,28 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 }
             }
 
-            if !parsed_any && let Some(call) = parse_malformed_file_write_call(inner) {
+            if !parsed_any
+                && legacy_fallbacks_allowed(open_tag)
+                && let Some(call) = parse_malformed_file_write_call(inner)
+            {
                 calls.push(call);
                 parsed_any = true;
             }
 
             // If JSON parsing failed, try XML format (DeepSeek/GLM style)
-            if !parsed_any && let Some(xml_calls) = parse_xml_tool_calls(inner) {
+            if !parsed_any
+                && legacy_fallbacks_allowed(open_tag)
+                && let Some(xml_calls) = parse_xml_tool_calls(inner)
+            {
                 calls.extend(xml_calls);
                 parsed_any = true;
             }
 
             if !parsed_any {
                 // GLM-style shortened body: `shell>uname -a` or `shell\ncommand: date`
-                if let Some(glm_call) = parse_glm_shortened_body(inner) {
+                if legacy_fallbacks_allowed(open_tag)
+                    && let Some(glm_call) = parse_glm_shortened_body(inner)
+                {
                     calls.push(glm_call);
                     parsed_any = true;
                 }
@@ -1945,19 +1967,28 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                     }
                 }
 
-                if !parsed_any && let Some(call) = parse_malformed_file_write_call(inner) {
+                if !parsed_any
+                    && legacy_fallbacks_allowed(open_tag)
+                    && let Some(call) = parse_malformed_file_write_call(inner)
+                {
                     calls.push(call);
                     parsed_any = true;
                 }
 
                 // Try XML
-                if !parsed_any && let Some(xml_calls) = parse_xml_tool_calls(inner) {
+                if !parsed_any
+                    && legacy_fallbacks_allowed(open_tag)
+                    && let Some(xml_calls) = parse_xml_tool_calls(inner)
+                {
                     calls.extend(xml_calls);
                     parsed_any = true;
                 }
 
                 // Try GLM shortened body
-                if !parsed_any && let Some(glm_call) = parse_glm_shortened_body(inner) {
+                if !parsed_any
+                    && legacy_fallbacks_allowed(open_tag)
+                    && let Some(glm_call) = parse_glm_shortened_body(inner)
+                {
                     calls.push(glm_call);
                     parsed_any = true;
                 }
@@ -1999,7 +2030,9 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 }
             }
 
-            if let Some(call) = parse_malformed_file_write_call(after_open) {
+            if legacy_fallbacks_allowed(open_tag)
+                && let Some(call) = parse_malformed_file_write_call(after_open)
+            {
                 calls.push(call);
                 remaining = "";
                 continue;
@@ -2008,7 +2041,9 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             // Last resort: try GLM shortened body on everything after the open tag.
             // The model may have emitted `<tool_call>shell>ls` with no close tag at all.
             let glm_input = after_open.trim();
-            if let Some(glm_call) = parse_glm_shortened_body(glm_input) {
+            if legacy_fallbacks_allowed(open_tag)
+                && let Some(glm_call) = parse_glm_shortened_body(glm_input)
+            {
                 calls.push(glm_call);
                 remaining = "";
                 continue;
@@ -3092,6 +3127,56 @@ Use them when appropriate."#;
             calls.is_empty(),
             "an echoed system prompt must not be parsed as an invocation, got {calls:?}"
         );
+    }
+
+    #[test]
+    fn tools_wrapper_does_not_reach_glm_shortened_body_on_matching_close() {
+        // GLM shortened bodies are executable legacy syntax: `shell>cmd` becomes
+        // a shell call under the unambiguous tags. `tools_wrapper_admits` cannot
+        // see it, because that helper only inspects values that already parsed
+        // as JSON -- so before `legacy_fallbacks_allowed`, this body reached
+        // `parse_glm_shortened_body` and was dispatched despite never satisfying
+        // the wrapper policy.
+        let response = "<tools>shell>rm -rf /tmp/x</tools>";
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "GLM shortened body under <tools> must stay inert, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn tools_wrapper_does_not_reach_glm_shortened_body_on_foreign_close() {
+        let response = "<tools>shell>rm -rf /tmp/x</tool_call>";
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "GLM body under <tools> with a foreign close must stay inert, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn tools_wrapper_does_not_reach_glm_shortened_body_when_unclosed() {
+        let response = "<tools>shell>rm -rf /tmp/x";
+        let (_text, calls) = parse_tool_calls(response);
+        assert!(
+            calls.is_empty(),
+            "unclosed GLM body under <tools> must stay inert, got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn glm_shortened_body_still_works_under_an_unambiguous_tag() {
+        // Positive control for the restriction: gating <tools> must not disable
+        // legacy recovery for the tags that are not overloaded.
+        let response = "<tool_call>shell>uname -a</tool_call>";
+        let (_text, calls) = parse_tool_calls(response);
+        assert_eq!(
+            calls.len(),
+            1,
+            "GLM shortened body must still parse under <tool_call>"
+        );
+        assert_eq!(calls[0].name, "shell");
     }
 
     #[test]
