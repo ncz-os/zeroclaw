@@ -1,0 +1,61 @@
+# GitLab CI — light Rust gate (fmt + check) for the zeroclaw fork on GitLab
+# SaaS shared runners. Heavy clippy/test/release builds run on Buildkite
+# (self-hosted, ncz-os) per the GRAEAE architecture review.
+stages:
+  - check
+  - security
+
+rust-gate:
+  stage: check
+  image: rust:1
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+    CARGO_TERM_COLOR: "always"
+  cache:
+    key: "cargo-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - target/
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev >/dev/null
+    - rustup component add rustfmt
+  script:
+    - cargo fmt --all -- --check
+    - cargo check --workspace --exclude zeroclaw-desktop --all-targets
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+# RUSTSEC advisory scan. Runs on the daily schedule (and manual web runs), NOT on
+# every push, so a newly-published advisory-DB entry never blocks day-to-day merges
+# — a red scheduled pipeline surfaces in the MEDUSA nightly report instead. Reads
+# Cargo.lock against the advisory DB (no project build), so it is cheap on SaaS.
+# Replaces the advisory scan that used to run on the now-frozen GitHub mirror.
+advisory-scan:
+  stage: security
+  image: rust:1
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+    CARGO_TERM_COLOR: "always"
+  cache:
+    # Bump the cache key suffix (v2, v3, ...) to force a fresh cargo-deny
+    # install after a cargo-deny release that changes advisory semantics,
+    # so an ancient binary never silently lingers past its point of usefulness.
+    key: "cargo-deny-bin-v2"
+    paths:
+      - .cargo/bin/
+  before_script:
+    - |
+      # Cache-miss safe: the version check is part of an `if !` test, so its
+      # nonzero exit on a missing binary is consumed and never propagates.
+      # If cargo-deny IS present but corrupted, `--force` overwrites it.
+      # Version is pinned to match deny.toml's v2 config schema and the
+      # local dev install; bump both in lockstep when upgrading.
+      if ! cargo deny --version >/dev/null 2>&1; then
+        cargo install cargo-deny --locked --version 0.19.9 --force
+      fi
+  script:
+    - cargo deny check advisories
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'

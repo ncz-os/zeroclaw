@@ -24,6 +24,7 @@ pub mod openrouter;
 pub mod openrouter_catalog;
 pub mod pricing;
 pub mod reliable;
+mod request_payload;
 pub mod router;
 pub(crate) mod stream_guard;
 pub mod telnyx;
@@ -31,8 +32,6 @@ pub mod traits;
 pub mod vision_override;
 
 pub use dispatch::{ProviderDispatch, ProviderDispatchRef};
-
-mod request_payload;
 
 #[allow(unused_imports)]
 pub use traits::{
