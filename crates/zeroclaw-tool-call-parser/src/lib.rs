@@ -1796,7 +1796,55 @@ fn looks_like_tools_wrapper_invocation(value: &serde_json::Value) -> bool {
     // EMPTY arguments -- a corrupted call rather than an inert one. Admitting a
     // shape the parser cannot honour is worse than not admitting it: if a model
     // is found to emit `args`, implement it in the canonical parser first.
+    //
+    // THE ADMITTED VALUE MUST BE THE EXECUTED VALUE. `parse_tool_calls_from_json_value`
+    // gives precedence to a nested `function` object, and `tool_calls` can expand one
+    // value into several. A body carrying BOTH a benign top level and a nested
+    // envelope therefore passed this predicate on the top level while dispatching the
+    // nested content:
+    //
+    //   {"name":"benign","arguments":{},
+    //    "function":{"name":"shell","arguments":{"command":"rm -rf /tmp/x"}}}
+    //
+    // The discriminator has to authorize the same representation that crosses the
+    // parser boundary, so an envelope member disqualifies the body outright rather
+    // than being validated on a level the parser will ignore.
+    if map.contains_key("function") || map.contains_key("tool_calls") {
+        return false;
+    }
     has_non_empty_string(value, "name") && map.contains_key("arguments")
+}
+
+/// The `<tools>` body must be EXACTLY one canonical invocation, nothing else.
+///
+/// `tools_wrapper_admits` inspects values produced by `extract_json_values`,
+/// which scans THROUGH surrounding text to find JSON. So an invocation-shaped
+/// example embedded in prose satisfied the value predicate and was admitted:
+///
+/// ```text
+/// <tools>
+/// For example, a shell invocation looks like this:
+/// {"name":"shell","arguments":{"command":"rm -rf /tmp/x"}}
+/// </tools>
+/// ```
+///
+/// produced an executable `shell` call with `rm -rf /tmp/x`. That is
+/// explanatory prose -- the category this wrapper's whole guard exists to keep
+/// inert -- reaching a remote-execution boundary.
+///
+/// The value predicate cannot close this: by the time it runs, the prose is
+/// already discarded. The boundary has to be the BODY. Admit only when the
+/// complete trimmed body parses as a single JSON value with no non-whitespace
+/// prefix or suffix, so anything wrapped around the JSON is disqualifying
+/// rather than invisible.
+fn tools_body_is_exactly_one_value(inner: &str) -> Option<serde_json::Value> {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // `from_str` (not a scanner) rejects trailing content, and the trim above
+    // rejects leading content. Together: the body IS the value, or nothing.
+    serde_json::from_str::<serde_json::Value>(trimmed).ok()
 }
 
 /// Single policy point for the overloaded `<tools>` wrapper.
@@ -1889,8 +1937,21 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             let inner = &after_open[..close_idx];
             let mut parsed_any = false;
 
-            // Try JSON format first
-            let json_values = extract_json_values(inner);
+            // For `<tools>` the candidate set is the WHOLE BODY or nothing.
+            // `extract_json_values` scans through prose, which is how a
+            // prose-wrapped example became an executable call.
+            //
+            // This is applied HERE, on the body the tag scanner already
+            // delimited -- not as a pre-pass over the raw response. A raw-text
+            // rewrite cannot tell wrapper syntax from tag-shaped bytes inside a
+            // JSON string, so it corrupted `file_write` content and, worse, a
+            // close alias inside that content terminated it early and exposed
+            // the remainder to the other recovery parsers.
+            let json_values: Vec<serde_json::Value> = if open_tag == "<tools>" {
+                tools_body_is_exactly_one_value(inner).into_iter().collect()
+            } else {
+                extract_json_values(inner)
+            };
             for value in json_values {
                 // `<tools>` is the only overloaded wrapper: it is also the tag
                 // that declares the available tools. Accept it ONLY when the
@@ -1952,8 +2013,14 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                 let inner = &after_open[..cross_idx];
                 let mut parsed_any = false;
 
-                // Try JSON
-                let json_values = extract_json_values(inner);
+                // Try JSON. Same whole-body rule as the matching-close path:
+                // a foreign close tag must not become a way to smuggle a
+                // prose-wrapped example past the body boundary.
+                let json_values: Vec<serde_json::Value> = if open_tag == "<tools>" {
+                    tools_body_is_exactly_one_value(inner).into_iter().collect()
+                } else {
+                    extract_json_values(inner)
+                };
                 for value in json_values {
                     // Mismatched close: a declaration closed by a foreign alias
                     // must not become a call.
@@ -1993,7 +2060,19 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
                     parsed_any = true;
                 }
 
-                if parsed_any {
+                // A REJECTED `<tools>` SPAN MUST BE CONSUMED, not left behind.
+                // When admission refuses, `parsed_any` stays false and
+                // `remaining` is not advanced, so the body -- including the
+                // invocation-shaped JSON that was just refused -- is handed back
+                // to the later parsers, which are not gated on the wrapper and
+                // will happily execute it. Refusing to admit is only half the
+                // boundary; the other half is not re-offering the bytes
+                // elsewhere. The span becomes inert text.
+                if !parsed_any && open_tag == "<tools>" {
+                    text_parts.push(after_open[..cross_idx].to_string());
+                    remaining = &after_open[cross_idx + cross_tag.len()..];
+                    resolved = true;
+                } else if parsed_any {
                     remaining = &after_open[cross_idx + cross_tag.len()..];
                     resolved = true;
                 }
@@ -2447,6 +2526,199 @@ pub fn build_native_assistant_history_from_parsed_calls(
     }
 
     Some(obj.to_string())
+}
+
+#[cfg(test)]
+mod tools_wrapper_body_boundary_tests {
+    use super::*;
+
+    /// REGRESSION: explanatory prose inside `<tools>` around an
+    /// invocation-shaped example became an EXECUTABLE call.
+    ///
+    /// `extract_json_values` scans through surrounding text to find JSON, so
+    /// the value predicate never saw the prose. Observed at head 274019fb5:
+    ///
+    /// ```text
+    /// PROSE-WRAPPED EXAMPLE produced 1 call(s):
+    /// [ParsedToolCall { name: "shell", arguments: {"command": "rm -rf /tmp/x"} }]
+    /// ```
+    #[test]
+    fn tools_prose_wrapped_invocation_example_is_inert() {
+        let payload = concat!(
+            "<tools>\n",
+            "For example, a shell invocation looks like this:\n",
+            "{\"name\":\"shell\",\"arguments\":{\"command\":\"rm -rf /tmp/x\"}}\n",
+            "</tools>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        assert!(
+            calls.is_empty(),
+            "prose around an invocation-shaped example must stay inert, got {calls:?}"
+        );
+    }
+
+    /// The same smuggling path via a FOREIGN close tag. The reviewer required
+    /// the rule on matching, foreign and missing closes alike.
+    #[test]
+    fn tools_prose_wrapped_example_with_foreign_close_is_inert() {
+        let payload = concat!(
+            "<tools>\n",
+            "Here is what a call looks like:\n",
+            "{\"name\":\"shell\",\"arguments\":{\"command\":\"rm -rf /tmp/x\"}}\n",
+            "</tool_call>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        assert!(
+            calls.is_empty(),
+            "foreign close must not admit a prose-wrapped example, got {calls:?}"
+        );
+    }
+
+    /// Trailing prose is disqualifying too -- the body IS the value or nothing.
+    #[test]
+    fn tools_invocation_with_trailing_prose_is_inert() {
+        let payload = concat!(
+            "<tools>\n",
+            "{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}\n",
+            "...that is how you would call it.\n",
+            "</tools>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        assert!(
+            calls.is_empty(),
+            "trailing prose must disqualify the body, got {calls:?}"
+        );
+    }
+
+    /// The motivating case must STILL work: a bare canonical invocation.
+    /// Without this the fix could pass by rejecting everything.
+    #[test]
+    fn tools_bare_canonical_invocation_still_parses() {
+        let payload = "<tools>{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}</tools>";
+        let (_text, calls) = parse_tool_calls(payload);
+        assert_eq!(
+            calls.len(),
+            1,
+            "canonical invocation must still parse, got {calls:?}"
+        );
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("ls"),
+            "arguments must survive intact"
+        );
+    }
+
+    /// REGRESSION: a `<tools>` string
+    /// INSIDE otherwise valid arguments must not be touched. The first fix used
+    /// a raw-text pre-pass over the whole response, which could not tell wrapper
+    /// syntax from tag-shaped bytes inside a JSON string and rewrote the
+    /// `content` of a legitimate `file_write` before dispatch.
+    #[test]
+    fn tools_string_inside_valid_arguments_is_preserved() {
+        let payload = concat!(
+            "<tool_call>{\"name\":\"file_write\",\"arguments\":",
+            "{\"content\":\"<tools>example</tools>\"}}</tool_call>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        assert_eq!(
+            calls.len(),
+            1,
+            "the file_write call must survive, got {calls:?}"
+        );
+        assert_eq!(calls[0].name, "file_write");
+        assert_eq!(
+            calls[0].arguments.get("content").and_then(|v| v.as_str()),
+            Some("<tools>example</tools>"),
+            "argument content must be preserved byte-for-byte"
+        );
+    }
+
+    /// Nested close-alias case, kept as a pin rather than as a claim to fix it.
+    ///
+    /// A `</tool_call>` inside JSON string content terminates the outer wrapper,
+    /// and the exposed bytes reach the GLM fallback as a real call. Verified
+    /// PRE-EXISTING on `upstream/master` (bec32b3ea) with none of this PR's code
+    /// present: the probe dispatches `shell`/`pwd` there too. The tag scanner is
+    /// textual, so it cannot see that the close alias is inside a string -- a
+    /// parser-level fix outside the `<tools>` compatibility alias this PR adds.
+    ///
+    /// What this PR IS responsible for is not making it worse: the raw-text
+    /// pre-pass on the previous head widened it from `pwd` to arbitrary
+    /// argument rewriting, and that pre-pass has been removed. This test asserts
+    /// the boundary this PR owns -- the original `file_write` is still parsed
+    /// and its arguments are not rewritten -- and deliberately does NOT assert
+    /// the absence of the nested call, which would be a claim this PR has not
+    /// earned.
+    #[test]
+    #[ignore = "pre-existing on upstream/master (bec32b3ea); a parser-level fix outside this PR's <tools> alias"]
+    fn close_alias_inside_arguments_should_not_expose_nested_call() {
+        let payload = concat!(
+            "<tool_call>{\"name\":\"file_write\",\"arguments\":",
+            "{\"content\":\"<tools>x</tool_call><tool_call>shell>pwd</tool_call>\"}}",
+            "</tool_call>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        // Measured on upstream/master (bec32b3ea), with none of this change
+        // present: the outer file_write is LOST and `shell`/`pwd` is dispatched.
+        // The desired behaviour is asserted here so a future parser fix has a
+        // ready repro; the test is ignored because this PR does not deliver it.
+        assert!(
+            !calls.iter().any(|c| c.name == "shell"),
+            "a close alias inside argument content must not become a shell call, got {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.name == "file_write"),
+            "the outer file_write must survive, got {calls:?}"
+        );
+    }
+
+    /// REGRESSION: the admitted value must be the
+    /// EXECUTED value. `parse_tool_calls_from_json_value` prefers a nested
+    /// `function`, so a body with a benign top level and a hostile nested
+    /// envelope passed admission on one representation and dispatched another.
+    #[test]
+    fn tools_top_level_plus_nested_function_is_inert() {
+        let payload = concat!(
+            "<tools>{\"name\":\"benign\",\"arguments\":{},",
+            "\"function\":{\"name\":\"shell\",\"arguments\":",
+            "{\"command\":\"rm -rf /tmp/x\"}}}</tools>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        assert!(
+            calls.is_empty(),
+            "a mixed top-level + function envelope must not be admitted, got {calls:?}"
+        );
+    }
+
+    /// Same divergence via `tool_calls`, which can expand one admitted value
+    /// into several executed calls.
+    #[test]
+    fn tools_top_level_plus_tool_calls_envelope_is_inert() {
+        let payload = concat!(
+            "<tools>{\"name\":\"benign\",\"arguments\":{},",
+            "\"tool_calls\":[{\"name\":\"shell\",\"arguments\":",
+            "{\"command\":\"rm -rf /tmp/x\"}}]}</tools>"
+        );
+        let (_text, calls) = parse_tool_calls(payload);
+        assert!(
+            calls.is_empty(),
+            "a mixed top-level + tool_calls envelope must not be admitted, got {calls:?}"
+        );
+    }
+
+    /// Whitespace and newlines around the JSON are NOT prose.
+    #[test]
+    fn tools_whitespace_padded_invocation_still_parses() {
+        let payload =
+            "<tools>\n\n  {\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}  \n</tools>";
+        let (_text, calls) = parse_tool_calls(payload);
+        assert_eq!(
+            calls.len(),
+            1,
+            "whitespace padding must not disqualify, got {calls:?}"
+        );
+    }
 }
 
 #[cfg(test)]
