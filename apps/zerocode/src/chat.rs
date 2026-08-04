@@ -466,10 +466,7 @@ impl Chat {
                     agent_alias.to_string(),
                     self.todo_settings,
                 );
-                // Only ACP shows the working directory above the input bar.
-                if self.pane_kind == PaneKind::Acp {
-                    state.cwd = session.workspace_dir;
-                }
+                state.cwd = session.workspace_dir;
                 Self::refresh_model_identity(&self.rpc, &mut state).await;
                 // On a resume, replay the daemon-retained transcript so the
                 // reattached pane shows the prior conversation rather than an
@@ -563,9 +560,7 @@ impl Chat {
                 let old_session_id = state.session_id.clone();
                 let _ = rpc.session_close(&old_session_id).await;
                 state.reset_for_session(s.session_id, None);
-                if pane_kind == PaneKind::Acp {
-                    state.cwd = s.workspace_dir;
-                }
+                state.cwd = s.workspace_dir;
                 Self::refresh_model_identity(rpc, state).await;
                 state.set_info_notice(crate::i18n::t("zc-chat-session-restarted"));
             }
@@ -972,7 +967,7 @@ impl Chat {
                 explorer.render(frame, area);
             }
             ChatPhase::Active(state) => {
-                render(frame, state, area);
+                render(frame, state, area, self.pane_kind);
             }
             ChatPhase::Error(msg) => {
                 draw_error(frame, area, msg, &self.pane_kind.name());
@@ -1273,6 +1268,16 @@ impl Chat {
             if let Some(entry) = confirm_session {
                 Self::switch_to_session_entry(&self.rpc, self.pane_kind, state, entry).await;
             }
+            return false;
+        }
+
+        // The attachment manager is modal within the input surface. Higher
+        // overlays above have already had first refusal; handle it before queue,
+        // browse, and other pane-level shortcuts.
+        if state.pending_approval().is_none() && state.input_bar.has_attachment_manager() {
+            state.clear_mouse_highlight();
+            let _ = state.input_bar.handle_key(key);
+            state.mark_dirty_full();
             return false;
         }
 
@@ -1818,9 +1823,7 @@ impl Chat {
         state.session_overlay = SessionOverlay::None;
         state.reset_for_session(new_sid.clone(), new_name);
         state.agent_alias = agent_alias.clone();
-        if pane_kind == PaneKind::Acp {
-            state.cwd = rehydrated.workspace_dir;
-        }
+        state.cwd = rehydrated.workspace_dir;
 
         Self::refresh_model_identity(rpc, state).await;
         if let Ok(msgs) = rpc.session_messages(&new_sid).await {
@@ -2193,8 +2196,11 @@ impl Chat {
             && let MouseEventKind::Down(MouseButton::Left) = mouse.kind
             && !state.turn_in_flight
             && !state.input_bar.has_file_explorer()
+            && !state.input_bar.has_attachment_manager()
             && matches!(state.session_overlay, SessionOverlay::None)
             && !state.model_picker.is_open()
+            && state.pending_approval().is_none()
+            && state.pending_elicitation().is_none()
             && state.title_hit_target_at(mouse.column, mouse.row) == Some(TitleHitTarget::Agent)
         {
             let current_alias = state.agent_alias.clone();
@@ -2203,8 +2209,8 @@ impl Chat {
         }
 
         if let ChatPhase::Active(ref mut state) = self.phase {
-            // Let the file explorer handle mouse events first when open.
-            if state.input_bar.handle_mouse(mouse) {
+            // The file explorer renders above every parent overlay.
+            if state.input_bar.has_file_explorer() && state.input_bar.handle_mouse(mouse) {
                 state.clear_mouse_highlight();
                 return;
             }
@@ -2259,6 +2265,17 @@ impl Chat {
                 if let Some(entry) = confirm_session {
                     Self::switch_to_session_entry(&self.rpc, self.pane_kind, state, entry).await;
                 }
+                return;
+            }
+
+            // Approval and elicitation overlays are keyboard-driven but still
+            // block clicks from reaching controls rendered beneath them.
+            if state.pending_approval().is_some() || state.pending_elicitation().is_some() {
+                return;
+            }
+
+            if state.input_bar.handle_mouse(mouse) {
+                state.clear_mouse_highlight();
                 return;
             }
 
@@ -2524,6 +2541,14 @@ impl Chat {
         }
     }
 
+    /// Working directory for the active conversation, if a session is running.
+    pub(crate) fn current_cwd(&self) -> Option<&str> {
+        match &self.phase {
+            ChatPhase::Active(s) => s.cwd.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Active info-bar message for the app-level `InfoBar`, expiring it first if
     /// it has outlived [`crate::widgets::INFO_BAR_TTL`] so the bar auto-hides.
     pub(crate) fn info_message(&mut self) -> Option<&crate::widgets::InfoMessage> {
@@ -2587,6 +2612,9 @@ impl Chat {
                     return true;
                 }
                 if !matches!(s.session_overlay, SessionOverlay::None) {
+                    return false;
+                }
+                if s.pending_approval().is_some() {
                     return false;
                 }
                 // Browse mode: single-char bindings active.
@@ -2985,7 +3013,7 @@ fn carve_todo_area(tracker: &crate::todo_tracker::TodoTracker, area: Rect) -> (R
     }
 }
 
-fn render(f: &mut Frame, state: &mut ChatState, area: Rect) {
+fn render(f: &mut Frame, state: &mut ChatState, area: Rect, pane_kind: PaneKind) {
     // Carve the TodoWrite tracker's area first (outermost split), so the
     // rest of the pane (queue sidebar, transcript, input) lays out in the
     // remaining body. When the tracker wants no space, `body == area` and
@@ -3041,7 +3069,9 @@ fn render(f: &mut Frame, state: &mut ChatState, area: Rect) {
     // Optional CWD line just above the input bar (bottom of conv_area).
     // Renders `<cwd> - (branch) (hash)`, all left-aligned; the branch and hash
     // segments are appended only when the daemon's git poll has resolved them.
-    let actual_conv = if let Some(ref cwd) = state.cwd {
+    let actual_conv = if pane_kind == PaneKind::Acp
+        && let Some(ref cwd) = state.cwd
+    {
         if conv_area.height > 1 {
             let cwd_row = Rect::new(
                 conv_area.x,
@@ -3080,6 +3110,7 @@ fn render(f: &mut Frame, state: &mut ChatState, area: Rect) {
 
     render_conversation(f, state, actual_conv);
     state.input_bar.render_autocomplete_popup(f);
+    state.input_bar.render_attachment_manager(f, area);
 
     if state.pending_approval().is_some() {
         render_approval_overlay(f, state, area);
@@ -3089,7 +3120,7 @@ fn render(f: &mut Frame, state: &mut ChatState, area: Rect) {
         render_elicitation_overlay(f, state, area);
     }
 
-    match &state.session_overlay {
+    match &mut state.session_overlay {
         SessionOverlay::List {
             sessions,
             list_state,
@@ -4188,7 +4219,7 @@ fn render_session_list_overlay(
     f: &mut Frame,
     area: Rect,
     sessions: &[SessionEntry],
-    list_state: &ListState,
+    list_state: &mut ListState,
     title: String,
 ) {
     let overlay_area = session_list_overlay_area(area);
@@ -4215,9 +4246,11 @@ fn render_session_list_overlay(
         .collect();
 
     let list = List::new(items).highlight_style(theme::list_highlight_style());
-    // Copy state to pass as mutable.
-    let mut ls = *list_state;
-    f.render_stateful_widget(list, inner, &mut ls);
+    // Render through the caller's state so the scroll offset ratatui computes
+    // to keep the selection visible is retained. Mouse hit-testing later reads
+    // `list_state.offset()`, so a discarded offset would make clicks after a
+    // scroll resolve to the wrong row.
+    f.render_stateful_widget(list, inner, list_state);
 }
 
 fn emit_code_block_body(lines: &mut Vec<Line<'static>>, text: &str, lang: Option<&str>) {
@@ -6956,7 +6989,7 @@ mod tests {
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &mut state, area))
+            .draw(|frame| render(frame, &mut state, area, PaneKind::Chat))
             .expect("draw chat");
 
         let snapshot = state
@@ -7414,6 +7447,34 @@ mod tests {
                 None,
             ));
         }
+        assert!(chat.wants_text_input());
+    }
+
+    #[tokio::test]
+    async fn attachment_manager_makes_chat_claim_text_input() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let (tx, _rx) = mpsc::channel::<String>(16);
+        let rpc = Arc::new(RpcOutbound::new(tx));
+        let client = Arc::new(RpcClient::with_rpc(Arc::clone(&rpc)));
+        let mut chat = Chat::new(client, PaneKind::Chat);
+        let mut active = state();
+        active.input_bar.add_attachment(PendingAttachment {
+            path: std::path::PathBuf::from("one.png"),
+            mime_type: "image/png".into(),
+            filename: "one.png".into(),
+            size_bytes: 1,
+            source: crate::attachment::AttachmentSource::File,
+        });
+        active.input_bar.insert_text("/attachments");
+        assert!(matches!(
+            active
+                .input_bar
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            crate::input_bar::InputBarAction::Consumed
+        ));
+        chat.phase = ChatPhase::Active(Box::new(active));
+
         assert!(chat.wants_text_input());
     }
 
@@ -8259,7 +8320,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
-                render(frame, &mut state, area);
+                render(frame, &mut state, area, PaneKind::Chat);
             })
             .expect("draw chat");
 
@@ -8293,6 +8354,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_picker_blocks_attachment_remove_click() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let (mut chat, _rx) = test_chat();
+        let mut active = state();
+        active.input_bar.add_attachment(PendingAttachment {
+            path: std::path::PathBuf::from("one.png"),
+            mime_type: "image/png".into(),
+            filename: "one.png".into(),
+            size_bytes: 1,
+            source: crate::attachment::AttachmentSource::File,
+        });
+        active.model_picker =
+            ModelPickerOverlay::Model(crate::widgets::PickerState::new(vec!["a".into()], None));
+
+        let area = Rect::new(0, 0, 80, 20);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut active, area, PaneKind::Chat))
+            .expect("draw chat");
+        let attachment_area = active
+            .input_bar
+            .attachment_area()
+            .expect("attachment row rendered");
+        chat.phase = ChatPhase::Active(Box::new(active));
+
+        chat.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: attachment_area.x + attachment_area.width - 2,
+                row: attachment_area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        )
+        .await;
+
+        let ChatPhase::Active(active) = &chat.phase else {
+            panic!("expected active chat");
+        };
+        assert_eq!(active.input_bar.pending_attachments().len(), 1);
+    }
+
+    #[tokio::test]
     async fn blank_side_click_clears_transcript_mouse_highlight() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::{Terminal, backend::TestBackend};
@@ -8310,7 +8417,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
-                render(frame, &mut state, area);
+                render(frame, &mut state, area, PaneKind::Chat);
             })
             .expect("draw chat");
 
@@ -8381,7 +8488,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
-                render(frame, &mut state, area);
+                render(frame, &mut state, area, PaneKind::Chat);
             })
             .expect("draw chat");
 
@@ -8422,7 +8529,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render(frame, state, area);
+                render(frame, state, area, PaneKind::Chat);
             })
             .expect("redraw browse-mode chat");
         let selected_entry_rect = state
@@ -8505,7 +8612,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
-                render(frame, &mut state, area);
+                render(frame, &mut state, area, PaneKind::Chat);
             })
             .expect("draw chat");
         let entry_rect = state
@@ -8594,7 +8701,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
-                render(frame, &mut state, area);
+                render(frame, &mut state, area, PaneKind::Chat);
             })
             .expect("draw chat");
 
@@ -9012,7 +9119,7 @@ mod tests {
                     frame,
                     area,
                     &sessions,
-                    &list_state,
+                    &mut list_state,
                     crate::i18n::t("zc-chat-session-list-switch-title"),
                 );
             })
@@ -9036,6 +9143,66 @@ mod tests {
             selected_text_cell.style().bg,
             Some(expected_bg),
             "selected session row must keep the themed fill background"
+        );
+    }
+
+    #[test]
+    fn session_overlay_retains_scroll_offset_for_mouse_hit_test() {
+        use ratatui::{Terminal, backend::TestBackend};
+        // Regression for the picker selecting the wrong row after scrolling:
+        // the renderer must persist the offset it computes so mouse hit-testing
+        // reads the same geometry that was drawn.
+        let sessions: Vec<SessionEntry> = (0..30)
+            .map(|i| SessionEntry {
+                session_id: format!("session-{i}"),
+                session_key: format!("session-{i}"),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                last_activity: "2026-01-01T00:00:00Z".to_string(),
+                agent_alias: Some("agent".to_string()),
+                channel_id: None,
+                name: Some(format!("prompt {i}")),
+                message_count: 1,
+            })
+            .collect();
+
+        let mut list_state = ListState::default();
+        // Select a row far enough down that the list must scroll to show it.
+        list_state.select(Some(25));
+
+        let area = Rect::new(0, 0, 100, 30);
+        let overlay_area = session_list_overlay_area(area);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_session_list_overlay(
+                    frame,
+                    area,
+                    &sessions,
+                    &mut list_state,
+                    crate::i18n::t("zc-chat-session-list-switch-title"),
+                );
+            })
+            .expect("draw session list overlay");
+
+        // The renderer scrolled the list to reveal the selection; that offset
+        // must survive the draw. Before the fix it was computed on a discarded
+        // copy and stayed 0.
+        let offset = list_state.offset();
+        assert!(
+            offset > 0,
+            "rendering a scrolled selection must retain a nonzero offset, got {offset}"
+        );
+
+        // A click on the third visible row must resolve through the retained
+        // offset, not the pre-scroll top of the list.
+        let clicked_row = overlay_area.y + 1 + 2;
+        let idx = crate::mouse::list_click_index(clicked_row, overlay_area, offset, sessions.len())
+            .expect("click inside the visible list resolves to a row");
+        assert_eq!(
+            idx,
+            offset + 2,
+            "clicked row must map to offset + visible row, not the unscrolled index"
         );
     }
 
