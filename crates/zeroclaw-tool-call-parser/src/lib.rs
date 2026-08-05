@@ -1837,6 +1837,41 @@ fn looks_like_tools_wrapper_invocation(value: &serde_json::Value) -> bool {
 /// complete trimmed body parses as a single JSON value with no non-whitespace
 /// prefix or suffix, so anything wrapped around the JSON is disqualifying
 /// rather than invisible.
+/// Locate the `<tools>` close STRUCTURALLY, not by substring search.
+///
+/// `after_open.find("</tools>")` is not JSON-string aware, so a literal
+/// `</tools>` inside argument content terminated the wrapper early:
+///
+/// ```text
+/// <tools>{"name":"file_write","arguments":{"content":"literal </tools> markup"}}</tools>
+/// ```
+///
+/// truncated mid-string, dropped the VALID `file_write` call entirely, and leaked
+/// `markup"}}</tools>` as visible text. Tool arguments routinely carry markup, so
+/// quoted tag text must never act as a delimiter.
+///
+/// Parse one JSON value from the body first; if the close tag follows it (modulo
+/// whitespace), that position is the real close. Fall back to the textual search
+/// only when the body is not a single JSON value -- declarations and prose, which
+/// are rejected on shape anyway and where no valid call can be lost.
+fn find_wrapper_close(open_tag: &str, after_open: &str, close_tag: &str) -> Option<usize> {
+    if open_tag == "<tools>" {
+        let lead = after_open.len() - after_open.trim_start().len();
+        let mut de = serde_json::Deserializer::from_str(after_open.trim_start())
+            .into_iter::<serde_json::Value>();
+        if let Some(Ok(_)) = de.next() {
+            let end = lead + de.byte_offset();
+            if let Some(rest) = after_open.get(end..) {
+                let ws = rest.len() - rest.trim_start().len();
+                if rest.trim_start().starts_with(close_tag) {
+                    return Some(end + ws);
+                }
+            }
+        }
+    }
+    after_open.find(close_tag)
+}
+
 fn tools_body_is_exactly_one_value(inner: &str) -> Option<serde_json::Value> {
     let trimmed = inner.trim();
     if trimmed.is_empty() {
@@ -1904,7 +1939,16 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         return (String::new(), vec![call]);
     }
 
-    if let Some((minimax_text, minimax_calls)) = parse_minimax_invoke_calls(response)
+    // Do NOT let this global scan run ahead of the `<tools>` loop. It searches the
+    // WHOLE response for executable `<invoke>` syntax, so legacy markup nested
+    // inside a `<tools>` wrapper executed before the body was ever classified:
+    // `<tools><invoke name="shell">...rm -rf /tmp/x...</invoke></tools>` dispatched
+    // a shell call while the visible text collapsed to `<tools></tools>`.
+    // `legacy_fallbacks_allowed()` gates the wrapper-LOCAL sites but cannot protect
+    // a scan that runs before the loop. When a `<tools>` span is present the guarded
+    // loop owns the text; minimax recovery still runs for responses without one.
+    if !response.contains("<tools>")
+        && let Some((minimax_text, minimax_calls)) = parse_minimax_invoke_calls(response)
         && !minimax_calls.is_empty()
     {
         return (minimax_text, minimax_calls);
@@ -1933,7 +1977,7 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         };
 
         let after_open = &remaining[start + open_tag.len()..];
-        if let Some(close_idx) = after_open.find(close_tag) {
+        if let Some(close_idx) = find_wrapper_close(open_tag, after_open, close_tag) {
             let inner = &after_open[..close_idx];
             let mut parsed_any = false;
 
@@ -2079,6 +2123,39 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             }
 
             if resolved {
+                continue;
+            }
+
+            // MISSING CLOSE under `<tools>`: the complete remainder IS the body.
+            //
+            // The recovery below uses find_json_end / extract_first_json_value_with_end,
+            // both of which scan THROUGH surrounding text. That let an
+            // invocation-shaped example with a prose prefix be admitted:
+            //
+            //     <tools>
+            //     For example:
+            //     {"name":"shell","arguments":{"command":"rm -rf /tmp/x"}}
+            //
+            // produced an executable shell call. A truncated wrapper must not weaken
+            // the rule the closed branches enforce, so apply the same complete-body
+            // test here; anything else is consumed as inert text so no later global
+            // parser can execute what this branch refused.
+            if open_tag == "<tools>" {
+                if let Some(value) = tools_body_is_exactly_one_value(after_open)
+                    && tools_wrapper_admits(open_tag, &value)
+                {
+                    let parsed_calls = parse_tool_calls_from_json_value(&value);
+                    if !parsed_calls.is_empty() {
+                        calls.extend(parsed_calls);
+                        remaining = "";
+                        continue;
+                    }
+                }
+                let body = after_open.trim();
+                if !body.is_empty() {
+                    text_parts.push(body.to_string());
+                }
+                remaining = "";
                 continue;
             }
 
@@ -2723,6 +2800,107 @@ mod tools_wrapper_body_boundary_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- <tools> boundary regressions (review of 2026-08-04, head 5d430a329) ----
+    // Each of the three below FAILED on that head and was reproduced before the
+    // fix; the surrounding cases pin the boundary from both sides so the guard
+    // cannot pass by simply rejecting everything.
+
+    #[test]
+    fn tools_unclosed_prose_prefixed_invocation_stays_inert() {
+        // find_json_end / extract_first_json_value_with_end scan THROUGH text, so a
+        // prose prefix under a truncated wrapper dispatched a real shell call.
+        let text = "<tools>\nFor example:\n{\"name\":\"shell\",\"arguments\":{\"command\":\"rm -rf /tmp/x\"}}";
+        let (_v, calls) = parse_tool_calls(text);
+        assert!(
+            calls.is_empty(),
+            "prose-prefixed unclosed body must not dispatch: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tools_unclosed_trailing_suffix_stays_inert() {
+        let text = "<tools>{\"name\":\"shell\",\"arguments\":{\"command\":\"rm -rf /tmp/x\"}} and then some prose";
+        let (_v, calls) = parse_tool_calls(text);
+        assert!(
+            calls.is_empty(),
+            "trailing non-whitespace must disqualify: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tools_unclosed_multiple_values_stays_inert() {
+        let text = "<tools>{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}{\"name\":\"shell\",\"arguments\":{\"command\":\"rm -rf /tmp/x\"}}";
+        let (_v, calls) = parse_tool_calls(text);
+        assert!(
+            calls.is_empty(),
+            "two values are not one body: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn tools_unclosed_bare_canonical_invocation_still_parses() {
+        // Positive control for the three above: a truncated wrapper around exactly
+        // one canonical invocation MUST still work, or the guard is just a mute.
+        let text = "<tools>{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}";
+        let (_v, calls) = parse_tool_calls(text);
+        assert_eq!(
+            calls.len(),
+            1,
+            "a clean unclosed invocation must still parse"
+        );
+        assert_eq!(calls[0].name, "shell");
+    }
+
+    #[test]
+    fn tools_wrapping_legacy_invoke_does_not_bypass_the_guard() {
+        // parse_minimax_invoke_calls ran BEFORE the <tools> loop over the whole
+        // response, so nested legacy markup executed before classification.
+        let text = "<tools><invoke name=\"shell\"><parameter name=\"command\">rm -rf /tmp/x</parameter></invoke></tools>";
+        let (_v, calls) = parse_tool_calls(text);
+        assert!(
+            calls.is_empty(),
+            "legacy <invoke> nested in <tools> must stay inert: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn bare_legacy_invoke_without_tools_still_parses() {
+        // Positive control for the pre-loop guard: minimax recovery must keep
+        // working for every response that has no <tools> span.
+        let text = "<invoke name=\"shell\"><parameter name=\"command\">ls</parameter></invoke>";
+        let (_v, calls) = parse_tool_calls(text);
+        assert_eq!(
+            calls.len(),
+            1,
+            "minimax <invoke> recovery must survive the guard"
+        );
+    }
+
+    #[test]
+    fn tools_literal_close_tag_inside_arguments_is_preserved() {
+        // A plain substring find is not JSON-string aware: a literal </tools> in
+        // argument content truncated the wrapper and LOST the valid call.
+        let text = "<tools>{\"name\":\"file_write\",\"arguments\":{\"content\":\"literal </tools> markup\"}}</tools>";
+        let (_v, calls) = parse_tool_calls(text);
+        assert_eq!(
+            calls.len(),
+            1,
+            "literal </tools> in content must not delimit: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(calls[0].name, "file_write");
+        let args = calls[0].arguments.to_string();
+        assert!(
+            args.contains("</tools>"),
+            "argument content must survive intact: {args}"
+        );
+    }
+
     use super::*;
 
     #[test]
