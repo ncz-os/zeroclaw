@@ -44,6 +44,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The default GITHUB_TOKEN is a GitHub App token, and GitHub refuses
+          # to let an App create or update files under .github/workflows -
+          # a hard anti-injection rule that no `permissions:` key overrides.
+          # Upstream commits routinely touch workflows, so every sync since at
+          # least 2026-08-02 failed with:
+          #   ! [remote rejected] upstream-head -> upstream-head (refusing to
+          #     allow a GitHub App to create or update workflow ...)
+          # SYNC_TOKEN is a personal token carrying the `workflow` scope, which
+          # is the only thing permitted to push those paths.
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Fast-forward the upstream-head mirror
         id: ff
