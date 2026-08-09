@@ -17,6 +17,14 @@ ignore = [
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard name constraints; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade
 
     # ── Informational only (no tracking issue required) ────────────────────
+    "RUSTSEC-2026-0222",  # wasmtime: stores can mix up type indices between
+                          # engines. 3.8 low. No fix exists in the 45.x line -
+                          # the advisory's fixed versions are >=24.0.12,
+                          # >=36.0.13, >=46.0.2 or >=47.0.3, so clearing it
+                          # means a semver-major wasmtime bump that would need
+                          # the cranelift, winch and pulley backends
+                          # revalidated. Tracked, not dismissed: revisit when
+                          # wasmtime is next bumped for other reasons.
     "RUSTSEC-2024-0384",  # instant unmaintained; informational advisory; transitive dep
 
     # ── audit.toml/deny.toml drift reconcile + wasmtime CVEs; tracking #8519 ──
