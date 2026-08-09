@@ -1948,17 +1948,30 @@ fn tools_span(after_open: &str) -> ToolsSpan {
     }
 }
 
-/// Does a byte offset in the response fall inside a `<tools>` span that was
-/// refused?
+/// Does a byte RANGE overlap any `<tools>` span that was refused?
 ///
 /// Refusing to admit a body is only half of the boundary. The other half is that
 /// the refused bytes are not offered to a second executable parser. Fallbacks
 /// that walk `remaining` get this for free, because the `<tools>` handler
 /// advances past the span. Fallbacks that re-scan the ORIGINAL response do not,
-/// and must consult this instead -- otherwise a refused body containing fenced
-/// tool-call syntax is simply parsed again by the next parser down.
-fn offset_in_rejected_span(rejected: &[std::ops::Range<usize>], offset: usize) -> bool {
-    rejected.iter().any(|span| span.contains(&offset))
+/// and must consult this instead.
+///
+/// THE TEST IS OVERLAP, NOT MEMBERSHIP OF THE START OFFSET. Asking only whether
+/// a match BEGINS inside a refused span leaves the boundary open from the other
+/// side: a fence that opens BEFORE the span and runs through it never starts
+/// inside anything, passes the check, and its body -- refused bytes included --
+/// is handed to `extract_json_values`, which finds the very object the `<tools>`
+/// handler rejected. Start-offset containment is not span containment.
+///
+/// Two ranges overlap when each begins before the other ends; empty ranges
+/// cannot overlap anything.
+fn range_hits_rejected_span(rejected: &[std::ops::Range<usize>], start: usize, end: usize) -> bool {
+    if start >= end {
+        return false;
+    }
+    rejected
+        .iter()
+        .any(|span| !span.is_empty() && start < span.end && span.start < end)
 }
 
 pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
@@ -2221,7 +2234,10 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
 
         for cap in MD_TOOL_CALL_RE.captures_iter(response) {
             let full_match = cap.get(0).unwrap();
-            if offset_in_rejected_span(&rejected_tools_spans, full_match.start()) {
+            // Range-aware: a fence that OPENS before a refused span and runs
+            // through it must be refused too, not just one that starts inside.
+            if range_hits_rejected_span(&rejected_tools_spans, full_match.start(), full_match.end())
+            {
                 continue;
             }
             let before = &response[last_end..full_match.start()];
@@ -2264,7 +2280,10 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
 
         for cap in MD_TOOL_NAME_RE.captures_iter(response) {
             let full_match = cap.get(0).unwrap();
-            if offset_in_rejected_span(&rejected_tools_spans, full_match.start()) {
+            // Range-aware: a fence that OPENS before a refused span and runs
+            // through it must be refused too, not just one that starts inside.
+            if range_hits_rejected_span(&rejected_tools_spans, full_match.start(), full_match.end())
+            {
                 continue;
             }
             let before = &response[last_end..full_match.start()];
@@ -3048,6 +3067,94 @@ mod tests {
             calls.is_empty(),
             "named-tool fence in a refused unclosed <tools> span must stay inert: {:?}",
             calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// REGRESSION: a fence that OPENS BEFORE a refused `<tools>` span and runs
+    /// through it must not be parsed either.
+    ///
+    /// The ledger originally tested only whether a match STARTED inside a
+    /// refused range. A fence opening before the span never starts inside
+    /// anything, passed that check, and its body -- refused bytes included --
+    /// reached `extract_json_values`, which found the very object the `<tools>`
+    /// handler had rejected. The existing tests cover the inverse nesting (fence
+    /// starting inside the span), so they do not exercise this direction.
+    #[test]
+    fn fence_opening_before_a_refused_tools_span_stays_inert() {
+        let text = concat!(
+            "```tool_call\n",
+            "<tools>\n",
+            "Here is how the format works:\n",
+            "{\"name\":\"shell\",\"arguments\":{\"command\":\"rm -rf /tmp/x\"}}\n",
+            "</tools>\n",
+            "```"
+        );
+        let (_v, calls) = parse_tool_calls(text);
+        assert!(
+            calls.is_empty(),
+            "a fence overlapping a refused <tools> span must stay inert: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The named-tool fence has the same overlap exposure.
+    #[test]
+    fn named_tool_fence_opening_before_a_refused_tools_span_stays_inert() {
+        let text = concat!(
+            "```tool file_write\n",
+            "<tools>\n",
+            "For example:\n",
+            "{\"path\":\"/tmp/x\",\"content\":\"pwned\"}\n",
+            "</tools>\n",
+            "```"
+        );
+        let (_v, calls) = parse_tool_calls(text);
+        assert!(
+            calls.is_empty(),
+            "a named-tool fence overlapping a refused span must stay inert: {:?}",
+            calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The overlap test must be OVERLAP, not "touches an endpoint". A fence that
+    /// ends exactly where a refused span begins shares no byte with it and must
+    /// still parse, or the guard silently eats adjacent legitimate calls.
+    #[test]
+    fn range_overlap_is_exclusive_at_the_boundaries() {
+        // Two spans, not one: a single-range vec is also a clippy trap, and
+        // multiple refused spans is the real shape anyway.
+        let rejected = [10usize..20usize, 40usize..50usize];
+        assert!(
+            !range_hits_rejected_span(&rejected, 0, 10),
+            "abutting before"
+        );
+        assert!(
+            !range_hits_rejected_span(&rejected, 20, 30),
+            "abutting after"
+        );
+        assert!(
+            range_hits_rejected_span(&rejected, 5, 15),
+            "opens before, crosses in"
+        );
+        assert!(
+            range_hits_rejected_span(&rejected, 15, 25),
+            "opens inside, crosses out"
+        );
+        assert!(
+            range_hits_rejected_span(&rejected, 0, 30),
+            "spans it entirely"
+        );
+        assert!(range_hits_rejected_span(&rejected, 12, 15), "wholly inside");
+        // An empty match cannot consume refused bytes.
+        assert!(!range_hits_rejected_span(&rejected, 15, 15), "empty range");
+        // The second span must be honoured too, not just the first.
+        assert!(
+            range_hits_rejected_span(&rejected, 45, 60),
+            "overlaps the later span"
+        );
+        assert!(
+            !range_hits_rejected_span(&rejected, 25, 35),
+            "between spans"
         );
     }
 
