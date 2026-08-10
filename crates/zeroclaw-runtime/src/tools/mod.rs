@@ -1130,9 +1130,7 @@ pub fn all_tools_with_runtime(
         security.clone(),
     )));
 
-    if let Ok(backend) =
-        zeroclaw_infra::make_session_backend(&config.data_dir, &config.channels.session_backend)
-    {
+    if let Ok(backend) = zeroclaw_infra::make_session_backend(&config.data_dir, &config.channels) {
         tool_arcs.push(Arc::new(SessionsCurrentTool::new(backend.clone())));
         tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
         tool_arcs.push(Arc::new(SessionsHistoryTool::new(

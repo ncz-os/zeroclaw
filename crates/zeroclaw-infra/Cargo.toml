@@ -7,18 +7,26 @@ description = "Channel infrastructure: session backends, debouncing, stall watch
 publish = false
 
 [dependencies]
-zeroclaw-log.workspace = true
 zeroclaw-api.workspace = true
+zeroclaw-config.workspace = true
 zeroclaw-spawn.workspace = true
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 parking_lot = "0.12"
 portable-atomic = "1"
+zeroclaw-log.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
-serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 tempfile = "3.26"
 tokio = { version = "1.50", default-features = false, features = ["sync", "time"] }
+
+# Feature-gated dependencies, only built with the backend-mnemos feature.
+# Matches the workspace blocking HTTP client used by zeroclaw-providers rather
+# than introducing a second one.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider", "__rustls-ring", "blocking"], optional = true }
+
+[features]
+backend-mnemos = ["dep:reqwest"]
 
 [dev-dependencies]
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros"] }

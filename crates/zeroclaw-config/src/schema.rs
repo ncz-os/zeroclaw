@@ -13319,6 +13319,23 @@ pub struct ChannelsConfig {
     /// SQLite provides FTS5 search, metadata tracking, and TTL cleanup.
     #[serde(default = "default_session_backend")]
     pub session_backend: String,
+    /// URL of the MNEMOS REST API endpoint. Used only when
+    /// `session_backend = "mnemos"`. Example: `"http://mnemos.local:5002"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mnemos_url: Option<String>,
+    /// Bearer token for the MNEMOS REST API. Read at runtime from the
+    /// MNEMOS_TOKEN environment variable; never stored in the config file.
+    #[serde(default, skip)]
+    pub mnemos_token: Option<String>,
+    /// Memory category under which to store session messages. Defaults to
+    /// `"zoder-session"`.
+    #[serde(default = "default_mnemos_category")]
+    pub mnemos_category: String,
+    /// Connection pool size for in-process HTTP workers. Defaults to `32`; see
+    /// `ureq::AgentBuilder::max_pool_size`. Ignored unless the `backend-mnemos`
+    /// feature is enabled.
+    #[serde(default = "default_mnemos_pool_size")]
+    pub mnemos_pool_size: u16,
     /// Auto-archive stale sessions older than this many hours. `0` disables. Default: `0`.
     #[serde(default)]
     pub session_ttl_hours: u32,
@@ -13694,6 +13711,14 @@ fn default_session_backend() -> String {
     "sqlite".into()
 }
 
+fn default_mnemos_category() -> String {
+    "zoder-session".into()
+}
+
+fn default_mnemos_pool_size() -> u16 {
+    32
+}
+
 impl Default for ChannelsConfig {
     fn default() -> Self {
         Self {
@@ -13740,6 +13765,10 @@ impl Default for ChannelsConfig {
             show_tool_calls: false,
             session_persistence: true,
             session_backend: default_session_backend(),
+            mnemos_url: None,
+            mnemos_token: None,
+            mnemos_category: default_mnemos_category(),
+            mnemos_pool_size: default_mnemos_pool_size(),
             session_ttl_hours: 0,
             debounce_ms: 0,
         }
@@ -26000,6 +26029,10 @@ auto_save = true
                 show_tool_calls: true,
                 session_persistence: true,
                 session_backend: default_session_backend(),
+                mnemos_url: None,
+                mnemos_token: None,
+                mnemos_category: default_mnemos_category(),
+                mnemos_pool_size: default_mnemos_pool_size(),
                 session_ttl_hours: 0,
                 debounce_ms: 0,
             },
@@ -27747,6 +27780,11 @@ allowed_users = ["@u:matrix.org"]
             session_backend: default_session_backend(),
             session_ttl_hours: 0,
             debounce_ms: 0,
+            // MNEMOS-specific fields required by the struct definition
+            mnemos_url: None,
+            mnemos_token: None,
+            mnemos_category: default_mnemos_category(),
+            mnemos_pool_size: default_mnemos_pool_size(),
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
@@ -28311,6 +28349,10 @@ allowed_numbers = ["+1", "+2"]
             show_tool_calls: true,
             session_persistence: true,
             session_backend: default_session_backend(),
+            mnemos_url: None,
+            mnemos_token: None,
+            mnemos_category: default_mnemos_category(),
+            mnemos_pool_size: default_mnemos_pool_size(),
             session_ttl_hours: 0,
             debounce_ms: 0,
         };

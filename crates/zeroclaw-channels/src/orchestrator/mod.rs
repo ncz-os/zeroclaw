@@ -11159,10 +11159,7 @@ pub async fn start_channels(
     // multiple agent ctxs reading the same backend never overlap.
     let shared_session_store: Option<Arc<dyn zeroclaw_infra::session_backend::SessionBackend>> =
         if config.channels.session_persistence {
-            match zeroclaw_infra::make_session_backend(
-                &config.data_dir,
-                &config.channels.session_backend,
-            ) {
+            match zeroclaw_infra::make_session_backend(&config.data_dir, &config.channels) {
                 Ok(backend) => {
                     ::zeroclaw_log::record!(
                         INFO,

@@ -245,6 +245,15 @@ pub trait SessionBackend: Send + Sync {
     fn list_stuck_sessions(&self, _threshold_secs: u64) -> Vec<SessionMetadata> {
         Vec::new()
     }
+
+    /// Name of the backing implementation (e.g. "sqlite", "jsonl", "mnemos").
+    ///
+    /// Defaulted rather than required: making this a bare method under a
+    /// feature flag would force every existing implementor to grow one, so
+    /// enabling `backend-mnemos` broke the whole workspace.
+    fn session_backend_name(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 /// Session state information.

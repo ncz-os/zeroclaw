@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
+use tokio::task::spawn_blocking;
 use zeroclaw_config::schema::{ChannelAliasInfo, Config};
 use zeroclaw_memory::MemoryEntry;
 
@@ -1725,7 +1726,13 @@ pub async fn handle_api_session_messages(
     } else {
         format!("gw_{id}")
     };
-    let msgs = backend.load_with_timestamps(&session_key);
+    let msgs = spawn_blocking({
+        let session_key = session_key.clone();
+        let backend = backend.clone();
+        move || backend.load_with_timestamps(&session_key)
+    })
+    .await
+    .unwrap_or_else(|_| Vec::new());
     let messages: Vec<serde_json::Value> = msgs
         .into_iter()
         .map(|m| {
@@ -1804,7 +1811,15 @@ pub async fn handle_api_session_message_post(
     };
 
     let message = zeroclaw_providers::ChatMessage::assistant(&body.content);
-    if let Err(e) = backend.append(&session_key, &message) {
+    if let Err(e) = spawn_blocking({
+        let session_key = session_key.clone();
+        let message = message.clone();
+        let backend = backend.clone();
+        move || backend.append(&session_key, &message)
+    })
+    .await
+    .unwrap_or(Ok(()))
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to append session message: {e}")})),
@@ -1875,7 +1890,14 @@ pub async fn handle_api_session_delete(
         );
     }
 
-    match backend.delete_session(&session_key) {
+    match spawn_blocking({
+        let session_key = session_key.clone();
+        let backend = backend.clone();
+        move || backend.delete_session(&session_key)
+    })
+    .await
+    .unwrap_or(Ok(false))
+    {
         Ok(true) => Json(serde_json::json!({"deleted": true, "session_id": id})).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -1921,7 +1943,12 @@ pub async fn handle_api_session_rename(
     let session_key = format!("gw_{id}");
 
     // Verify the session exists before renaming
-    let sessions = backend.list_sessions();
+    let sessions = spawn_blocking({
+        let backend = backend.clone();
+        move || backend.list_sessions()
+    })
+    .await
+    .unwrap_or_default();
     if !sessions.contains(&session_key) {
         return (
             StatusCode::NOT_FOUND,
@@ -1930,7 +1957,15 @@ pub async fn handle_api_session_rename(
             .into_response();
     }
 
-    match backend.set_session_name(&session_key, name) {
+    match spawn_blocking({
+        let session_key = session_key.clone();
+        let name = name.to_string();
+        let backend = backend.clone();
+        move || backend.set_session_name(&session_key, &name)
+    })
+    .await
+    .unwrap_or(Ok(()))
+    {
         Ok(()) => Json(serde_json::json!({"session_id": id, "name": name})).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1957,7 +1992,12 @@ pub async fn handle_api_sessions_running(
         .into_response();
     };
 
-    let running = backend.list_running_sessions();
+    let running = spawn_blocking({
+        let backend = backend.clone();
+        move || backend.list_running_sessions()
+    })
+    .await
+    .unwrap_or_default();
     let sessions: Vec<serde_json::Value> = running
         .into_iter()
         .filter_map(|meta| {
@@ -1993,7 +2033,14 @@ pub async fn handle_api_session_state(
     };
 
     let session_key = format!("gw_{id}");
-    match backend.get_session_state(&session_key) {
+    let state_opt = spawn_blocking({
+        let session_key = session_key.clone();
+        let backend = backend.clone();
+        move || backend.get_session_state(&session_key)
+    })
+    .await
+    .unwrap_or(Ok(None));
+    match state_opt {
         Ok(Some(ss)) => {
             let mut resp = serde_json::json!({
                 "session_id": id,
