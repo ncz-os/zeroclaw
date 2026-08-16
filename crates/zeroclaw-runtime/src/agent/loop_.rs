@@ -663,6 +663,9 @@ pub(crate) fn build_system_prompt_for_turn(
         inject_memory,
         show_tool_calls,
         shell_profile,
+        // The agent loop is the CLI / headless coding surface, not a messaging
+        // channel: do not tell it that its replies are delivered to a chat.
+        false,
     );
 
     if expose_text_tool_protocol {
@@ -3219,6 +3222,7 @@ pub async fn process_message(
                 false,
                 config.channels.show_tool_calls,
                 runtime.shell_profile().as_ref(),
+                false,
             );
         if expose_text_tool_protocol {
             system_prompt.push_str(&build_tool_instructions_for_names(
