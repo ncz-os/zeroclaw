@@ -687,6 +687,10 @@ pub(crate) fn build_system_prompt_for_turn(
     show_tool_calls: bool,
     thinking_prefix: Option<&str>,
     shell_profile: Option<&zeroclaw_api::runtime_traits::ShellProfile>,
+    // Whether this surface is a messaging channel. Threaded from config the
+    // same way as `show_tool_calls`: zeroclaw is a general-purpose agent, so
+    // the embedder declares the surface instead of the runtime inferring it.
+    emit_channel_capabilities: bool,
 ) -> Result<String> {
     let native_tools = model_provider
         .capabilities_for_model(model_name)
@@ -731,10 +735,7 @@ pub(crate) fn build_system_prompt_for_turn(
             inject_memory,
             show_tool_calls,
             shell_profile,
-            // The agent loop is the CLI / headless coding surface, not a
-            // messaging channel: do not tell it that its replies are delivered
-            // to a chat.
-            false,
+            emit_channel_capabilities,
         );
 
     if expose_text_tool_protocol {
@@ -1868,6 +1869,7 @@ pub async fn run(
             config.channels.show_tool_calls,
             None,
             runtime.shell_profile().as_ref(),
+            config.channels.emit_channel_capabilities,
         )?;
 
         // ── Approval manager (supervised mode) ───────────────────────
@@ -1969,6 +1971,7 @@ pub async fn run(
                 config.channels.show_tool_calls,
                 thinking_params.system_prompt_prefix.as_deref(),
                 runtime.shell_profile().as_ref(),
+                config.channels.emit_channel_capabilities,
             )?;
 
             let excluded_tool_names: HashSet<&str> =
@@ -2105,6 +2108,7 @@ pub async fn run(
                         config.channels.show_tool_calls,
                         thinking_params.system_prompt_prefix.as_deref(),
                         runtime.shell_profile().as_ref(),
+                        config.channels.emit_channel_capabilities,
                     )?;
                 }
                 match zeroclaw_api::NATIVE_THINKING_OVERRIDE
@@ -2708,6 +2712,7 @@ pub async fn run(
                             config.channels.show_tool_calls,
                             thinking_params.system_prompt_prefix.as_deref(),
                             runtime.shell_profile().as_ref(),
+                            config.channels.emit_channel_capabilities,
                         )?;
                     }
                     match zeroclaw_api::NATIVE_THINKING_OVERRIDE
@@ -3565,7 +3570,7 @@ async fn process_message_inner(
                 false,
                 config.channels.show_tool_calls,
                 runtime.shell_profile().as_ref(),
-                false,
+                config.channels.emit_channel_capabilities,
             );
         if expose_text_tool_protocol {
             system_prompt.push_str(&build_tool_instructions_for_names(
@@ -15434,6 +15439,7 @@ Let me check the result."#;
             false,
             None,
             None,
+            true,
         )
         .expect("startup prompt should build");
         assert!(startup_prompt.contains(NATIVE_TOOLS_TASK_FRAMING));
@@ -15467,6 +15473,7 @@ Let me check the result."#;
             false,
             None,
             None,
+            true,
         )
         .expect("no-tools turn prompt should build");
         assert!(
@@ -15503,6 +15510,7 @@ Let me check the result."#;
             false,
             None,
             None,
+            true,
         )
         .expect("tools turn prompt should build");
         assert!(tools_turn_prompt.contains(NATIVE_TOOLS_TASK_FRAMING));
@@ -15737,6 +15745,7 @@ Let me check the result."#;
             false,
             None,
             None,
+            true,
         )
         .expect("compact-mode text prompt should build");
 
