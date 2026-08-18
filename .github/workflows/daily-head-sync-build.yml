@@ -227,7 +227,12 @@ jobs:
           # Daily HEAD image. Packages the binaries built by the build-head matrix
           # instead of recompiling; the source build lives in the repo Dockerfile
           # and is used for tagged releases.
-          FROM debian:bookworm-slim
+          # trixie, not bookworm: the build-head matrix compiles on ubuntu-24.04
+          # runners (glibc 2.39) and bookworm ships glibc 2.36. glibc is
+          # backward compatible, not forward, so a bookworm runtime rejects the
+          # binary at exec with "version `GLIBC_2.39' not found". trixie is
+          # glibc 2.41.
+          FROM debian:trixie-slim
           ARG TARGETARCH
           ARG ZC_COMMIT
           RUN apt-get update \
