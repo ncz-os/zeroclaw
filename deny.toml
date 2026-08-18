@@ -63,6 +63,7 @@ ignore = [
     # (Tauri) was removed in PR #8544.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive macro helper; tracking #8519" },
     { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; transitive derive helper; tracking #8519" },
+    { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained (repo archived 2026-05-03); no safe upgrade exists; transitive via imbl -> imbl-sized-chunks; tracking #8519" },
 ]
 
 [licenses]
