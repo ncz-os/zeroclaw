@@ -157,10 +157,9 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     // guidance entirely). Resolved from `RuntimeAdapter::shell_profile` so the
     // reported shell cannot drift from the executed one.
     shell_profile: Option<&ShellProfile>,
-    // When `false`, the "Channel Capabilities" section is omitted. Set
-    // `false` for CLI / coding / headless runs, which are not messaging
-    // channels and should not be told they are a messaging bot.
-    emit_channel_capabilities: bool,
+    // Whether this turn is on a messaging channel surface. The caller owns
+    // this per-turn fact; it must not come from process-wide channel config.
+    is_messaging_channel_turn: bool,
 ) -> String {
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
@@ -448,7 +447,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
 
     // ── 8. Channel Capabilities (skipped in compact_context mode, and for
     //       surfaces that are not a messaging channel) ──
-    if !compact_context && emit_channel_capabilities {
+    if !compact_context && is_messaging_channel_turn {
         prompt.push_str("## Channel Capabilities\n\n");
         prompt.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
         prompt
@@ -569,6 +568,7 @@ mod tests {
             true,
             false,
             shell_profile,
+            false,
         )
     }
 
@@ -704,6 +704,7 @@ mod tests {
             true,
             false,
             Some(&profile),
+            false,
         );
         assert!(
             !prompt.contains("## Shell"),
@@ -968,6 +969,7 @@ mod tests {
             0,
             true,
             false,
+            None,
             true,
         );
         let cli = build_system_prompt_with_mode_and_autonomy(
@@ -984,6 +986,7 @@ mod tests {
             0,
             true,
             false,
+            None,
             false,
         );
 
