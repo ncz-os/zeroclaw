@@ -15889,14 +15889,6 @@ pub struct ChannelsConfig {
     /// not forwarded as individual channel messages. Default: `false`.
     #[serde(default = "default_false")]
     pub show_tool_calls: bool,
-    /// Emit the `## Channel Capabilities` section of the system prompt, which
-    /// tells the agent it is a messaging bot whose reply is delivered to a
-    /// user's channel, including voice-note transcription and TTS behaviour.
-    /// That is accurate for chat surfaces and misleading for CLI, coding and
-    /// headless runs, where it gives the agent a messaging-assistant persona.
-    /// Default: `true`, preserving existing behaviour for chat deployments.
-    #[serde(default = "default_true")]
-    pub emit_channel_capabilities: bool,
     /// Persist channel conversation history to JSONL files so sessions survive
     /// daemon restarts. Files are stored in `{workspace}/sessions/`. Default: `true`.
     #[serde(default = "default_true")]
@@ -16360,7 +16352,6 @@ impl Default for ChannelsConfig {
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
             ack_reactions: true,
             show_tool_calls: false,
-            emit_channel_capabilities: true,
             session_persistence: true,
             session_backend: default_session_backend(),
             session_ttl_hours: 0,
@@ -32384,7 +32375,6 @@ auto_save = true
                 max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
                 ack_reactions: true,
                 show_tool_calls: true,
-                emit_channel_capabilities: true,
                 session_persistence: true,
                 session_backend: default_session_backend(),
                 session_ttl_hours: 0,
@@ -34557,7 +34547,6 @@ allowed_users = ["@u:matrix.org"]
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
             ack_reactions: true,
             show_tool_calls: true,
-            emit_channel_capabilities: true,
             session_persistence: true,
             session_backend: default_session_backend(),
             session_ttl_hours: 0,
@@ -35114,7 +35103,6 @@ allowed_numbers = ["+1", "+2"]
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
             ack_reactions: true,
             show_tool_calls: true,
-            emit_channel_capabilities: true,
             session_persistence: true,
             session_backend: default_session_backend(),
             session_ttl_hours: 0,

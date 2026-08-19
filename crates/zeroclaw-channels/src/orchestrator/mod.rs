@@ -16471,7 +16471,7 @@ pub async fn start_channels_with_plugin_webhooks(
             true,
             config.channels.show_tool_calls,
             runtime.shell_profile().as_ref(),
-            config.channels.emit_channel_capabilities,
+            true,
         );
         if expose_text_tool_protocol {
             system_prompt.push_str(&build_tool_instructions_for_names(
