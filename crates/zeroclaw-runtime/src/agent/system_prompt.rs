@@ -195,10 +195,9 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     // guidance entirely). Resolved from `RuntimeAdapter::shell_profile` so the
     // reported shell cannot drift from the executed one.
     shell_profile: Option<&ShellProfile>,
-    // When `false`, the "Channel Capabilities" section is omitted. Set
-    // `false` for CLI / coding / headless runs, which are not messaging
-    // channels and should not be told they are a messaging bot.
-    emit_channel_capabilities: bool,
+    // Whether this turn is on a messaging channel surface. The caller owns
+    // this per-turn fact; it must not come from process-wide channel config.
+    is_messaging_channel_turn: bool,
 ) -> String {
     build_system_prompt_with_mode_and_effective_tools(
         workspace_dir,
@@ -216,7 +215,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
         inject_memory,
         show_tool_calls,
         shell_profile,
-        emit_channel_capabilities,
+        is_messaging_channel_turn,
     )
 }
 
@@ -241,8 +240,9 @@ pub fn build_system_prompt_with_mode_and_effective_tools(
     inject_memory: bool,
     show_tool_calls: bool,
     shell_profile: Option<&ShellProfile>,
-    // Whether to emit messaging-channel-specific response and voice guidance.
-    emit_channel_capabilities: bool,
+    // Whether this turn is on a messaging channel surface. The caller owns
+    // this per-turn fact; it must not come from process-wide channel config.
+    is_messaging_channel_turn: bool,
 ) -> String {
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
@@ -503,7 +503,7 @@ pub fn build_system_prompt_with_mode_and_effective_tools(
     // ── 8. Channel Capabilities (full copy skipped in compact_context mode
     //       and for non-messaging surfaces; the timestamp orientation below
     //       emits in both modes) ──
-    if !compact_context && emit_channel_capabilities {
+    if !compact_context && is_messaging_channel_turn {
         prompt.push_str("## Channel Capabilities\n\n");
         prompt.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
         prompt
@@ -760,7 +760,7 @@ mod tests {
             true,
             false,
             shell_profile,
-            true,
+            false,
         )
     }
 
@@ -896,7 +896,7 @@ mod tests {
             true,
             false,
             Some(&profile),
-            true,
+            false,
         );
         assert!(
             !prompt.contains("## Shell"),
