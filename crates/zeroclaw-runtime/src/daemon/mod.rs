@@ -489,7 +489,8 @@ pub async fn run(
             &config.data_dir,
             &config.channels.session_backend,
         )
-        .ok();
+        .ok()
+        .map(|backend| std::sync::Arc::new(zeroclaw_infra::AsyncSessionBackend::new(backend)));
 
         // Wire the memory subsystem so `memory/list` and `memory/search`
         // work over RPC transports (same pattern as the gateway).

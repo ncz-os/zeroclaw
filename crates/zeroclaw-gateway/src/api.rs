@@ -1684,7 +1684,7 @@ pub async fn handle_api_session_messages(
         return e.into_response();
     }
 
-    let Some(ref backend) = state.session_backend else {
+    let Some(ref async_backend) = state.session_backend else {
         return Json(serde_json::json!({
             "session_id": id,
             "messages": [],
@@ -1701,7 +1701,7 @@ pub async fn handle_api_session_messages(
     } else {
         format!("gw_{id}")
     };
-    let msgs = match backend.load_with_timestamps(&session_key) {
+    let msgs = match async_backend.load_with_timestamps(&session_key).await {
         Ok(msgs) => msgs,
         Err(e) => {
             ::zeroclaw_log::record!(

@@ -12,7 +12,7 @@ use zeroclaw_api::channel::ChannelApprovalResponse;
 use zeroclaw_config::cost::tracker::CostTracker;
 use zeroclaw_config::schema::Config;
 use zeroclaw_infra::acp_session_store::AcpSessionStore;
-use zeroclaw_infra::session_backend::SessionBackend;
+use zeroclaw_infra::AsyncSessionBackend;
 
 use super::session::SessionStore;
 use super::tui_identity::TuiRegistry;
@@ -125,9 +125,10 @@ pub struct RpcContext {
     /// In-memory session store for active RPC sessions.
     pub sessions: Arc<SessionStore>,
 
-    /// Persistent session backend (SQLite / JSONL) for history and
-    /// session metadata. `None` when persistence is disabled.
-    pub session_backend: Option<Arc<dyn SessionBackend>>,
+    /// Async facade for persistent session backend (SQLite / JSONL)
+    /// for history and session metadata. `None` when persistence is disabled.
+    /// This is the shared async facade (F1) - ONE per process, injected at bootstrap.
+    pub session_backend: Option<Arc<AsyncSessionBackend>>,
 
     /// Memory subsystem (`dyn Memory` from `zeroclaw-api`).
     pub memory: Option<Arc<dyn zeroclaw_api::memory_traits::Memory>>,
@@ -321,7 +322,7 @@ impl RpcContext {
     pub fn for_persistence_tests(
         config: Config,
         sessions: Arc<SessionStore>,
-        session_backend: Option<Arc<dyn SessionBackend>>,
+        session_backend: Option<Arc<AsyncSessionBackend>>,
         acp_session_store: Option<Arc<AcpSessionStore>>,
     ) -> Arc<Self> {
         Arc::new(Self {

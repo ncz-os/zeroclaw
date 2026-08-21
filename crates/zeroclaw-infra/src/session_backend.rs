@@ -2,6 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use zeroclaw_api::model_provider::ChatMessage;
+use std::sync::Arc;
+use std::path::Path;
 
 /// Metadata about a persisted session.
 #[derive(Debug, Clone)]
@@ -45,6 +47,37 @@ pub struct SessionContext<'a> {
     pub room_id: Option<&'a str>,
     /// Inbound sender id (channel-native username, phone, ...).
     pub sender_id: Option<&'a str>,
+}
+
+/// Owned version of SessionContext for async operations.
+#[derive(Debug, Clone, Default)]
+pub struct OwnedSessionContext {
+    /// `<type>.<alias>` ChannelRef (`discord.clamps`).
+    pub channel_id: Option<String>,
+    /// Platform-side room / thread id.
+    pub room_id: Option<String>,
+    /// Inbound sender id (channel-native username, phone, ...).
+    pub sender_id: Option<String>,
+}
+
+impl<'a> From<SessionContext<'a>> for OwnedSessionContext {
+    fn from(ctx: SessionContext<'a>) -> Self {
+        Self {
+            channel_id: ctx.channel_id.map(|s| s.to_string()),
+            room_id: ctx.room_id.map(|s| s.to_string()),
+            sender_id: ctx.sender_id.map(|s| s.to_string()),
+        }
+    }
+}
+
+impl<'a> From<&'a OwnedSessionContext> for SessionContext<'a> {
+    fn from(ctx: &'a OwnedSessionContext) -> Self {
+        Self {
+            channel_id: ctx.channel_id.as_deref(),
+            room_id: ctx.room_id.as_deref(),
+            sender_id: ctx.sender_id.as_deref(),
+        }
+    }
 }
 
 /// Query parameters for listing sessions.
@@ -281,6 +314,317 @@ pub trait SessionBackend: Send + Sync {
     /// List sessions stuck in "running" state longer than `threshold_secs`.
     fn list_stuck_sessions(&self, _threshold_secs: u64) -> std::io::Result<Vec<SessionMetadata>> {
         Ok(Vec::new())
+    }
+}
+
+/// Shared async facade for SessionBackend operations.
+///
+/// This facade wraps the synchronous SessionBackend trait and executes all
+/// operations on a blocking task pool, preventing blocking calls from stalling
+/// async executors. This is the SINGLE shared facade used by all async consumers
+/// (WS/RPC/channel paths), replacing per-caller blocking adapters.
+///
+/// ## Usage
+///
+/// ```rust,ignore
+/// let backend: Arc<dyn SessionBackend> = /* ... */;
+/// let async_backend = AsyncSessionBackend::new(backend);
+///
+/// // Use in async contexts without blocking the executor
+/// let messages = async_backend.load("session_key").await?;
+/// ```
+///
+/// ## F1 Compliance
+///
+/// - ONE shared facade per process (injected at bootstrap)
+/// - NO per-caller adapters (gateway, runtime, tools all use this)
+/// - Backend construction happens once at bootstrap, off async entry paths
+pub struct AsyncSessionBackend {
+    /// The underlying synchronous backend (public for testing)
+    pub backend: Arc<dyn SessionBackend>,
+}
+
+impl AsyncSessionBackend {
+    /// Create a new async facade wrapping a synchronous backend.
+    pub fn new(backend: Arc<dyn SessionBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// Load all messages for a session (async).
+    pub async fn load(&self, session_key: &str) -> std::io::Result<Vec<ChatMessage>> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.load(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Load messages with timestamps (async).
+    pub async fn load_with_timestamps(
+        &self,
+        session_key: &str,
+    ) -> std::io::Result<Vec<TimestampedMessage>> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.load_with_timestamps(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Append a message to a session (async).
+    pub async fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        let message = message.clone();
+        tokio::task::spawn_blocking(move || backend.append(&session_key, &message))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// List all session keys (async).
+    pub async fn list_sessions(&self) -> std::io::Result<Vec<String>> {
+        let backend = self.backend.clone();
+        tokio::task::spawn_blocking(move || backend.list_sessions())
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// List sessions with metadata (async).
+    pub async fn list_sessions_with_metadata(&self) -> std::io::Result<Vec<SessionMetadata>> {
+        let backend = self.backend.clone();
+        tokio::task::spawn_blocking(move || backend.list_sessions_with_metadata())
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Check if a session exists (async).
+    pub async fn session_exists(&self, session_key: &str) -> std::io::Result<bool> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.session_exists(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Get session metadata (async).
+    pub async fn get_session_metadata(&self, session_key: &str) -> std::io::Result<Option<SessionMetadata>> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.get_session_metadata(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Set session name (async).
+    pub async fn set_session_name(&self, session_key: &str, name: &str) -> std::io::Result<()> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || backend.set_session_name(&session_key, &name))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Get session name (async).
+    pub async fn get_session_name(&self, session_key: &str) -> std::io::Result<Option<String>> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.get_session_name(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Set session agent alias (async).
+    pub async fn set_session_agent_alias(&self, session_key: &str, agent_alias: &str) -> std::io::Result<()> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        let agent_alias = agent_alias.to_string();
+        tokio::task::spawn_blocking(move || backend.set_session_agent_alias(&session_key, &agent_alias))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Get session agent alias (async).
+    pub async fn get_session_agent_alias(&self, session_key: &str) -> std::io::Result<Option<String>> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.get_session_agent_alias(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Set session context (async).
+    pub async fn set_session_context(&self, session_key: &str, context: OwnedSessionContext) -> std::io::Result<()> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            backend.set_session_context(&session_key, SessionContext {
+                channel_id: context.channel_id.as_deref(),
+                room_id: context.room_id.as_deref(),
+                sender_id: context.sender_id.as_deref(),
+            })
+        })
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+        .and_then(|result| result)
+    }
+
+    /// Set session state (async).
+    pub async fn set_session_state(&self, session_key: &str, state: &str, turn_id: Option<&str>) -> std::io::Result<()> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        let state = state.to_string();
+        let turn_id = turn_id.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            backend.set_session_state(&session_key, &state, turn_id.as_deref())
+        })
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+        .and_then(|result| result)
+    }
+
+    /// Get session state (async).
+    pub async fn get_session_state(&self, session_key: &str) -> std::io::Result<Option<SessionState>> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.get_session_state(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result.map(|opt| opt.map(|s| SessionState {
+                state: s.state,
+                turn_id: s.turn_id,
+                turn_started_at: s.turn_started_at,
+            })))
+    }
+
+    /// List running sessions (async).
+    pub async fn list_running_sessions(&self) -> std::io::Result<Vec<SessionMetadata>> {
+        let backend = self.backend.clone();
+        tokio::task::spawn_blocking(move || backend.list_running_sessions())
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// List stuck sessions (async).
+    pub async fn list_stuck_sessions(&self, threshold_secs: u64) -> std::io::Result<Vec<SessionMetadata>> {
+        let backend = self.backend.clone();
+        tokio::task::spawn_blocking(move || backend.list_stuck_sessions(threshold_secs))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Remove last message from a session (async).
+    pub async fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.remove_last(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Update last message in a session (async).
+    pub async fn update_last(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<bool> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        let message = message.clone();
+        tokio::task::spawn_blocking(move || backend.update_last(&session_key, &message))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Clear all messages from a session (async).
+    pub async fn clear_messages(&self, session_key: &str) -> std::io::Result<usize> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.clear_messages(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Delete a session (async).
+    pub async fn delete_session(&self, session_key: &str) -> std::io::Result<bool> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.delete_session(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Search sessions by keyword (async).
+    pub async fn search(&self, query: &SessionQuery) -> std::io::Result<Vec<SessionMetadata>> {
+        let backend = self.backend.clone();
+        let query = query.clone();
+        tokio::task::spawn_blocking(move || backend.search(&query))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Compact a session file (async).
+    pub async fn compact(&self, session_key: &str) -> std::io::Result<()> {
+        let backend = self.backend.clone();
+        let session_key = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.compact(&session_key))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Cleanup stale sessions (async).
+    pub async fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
+        let backend = self.backend.clone();
+        tokio::task::spawn_blocking(move || backend.cleanup_stale(ttl_hours))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Rename agent attribution (async).
+    pub async fn rename_agent_attribution(&self, from: &str, to: &str) -> std::io::Result<usize> {
+        let backend = self.backend.clone();
+        let from = from.to_string();
+        let to = to.to_string();
+        tokio::task::spawn_blocking(move || backend.rename_agent_attribution(&from, &to))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Clear agent attribution (async).
+    pub async fn clear_agent_attribution(&self, agent_alias: &str) -> std::io::Result<usize> {
+        let backend = self.backend.clone();
+        let agent_alias = agent_alias.to_string();
+        tokio::task::spawn_blocking(move || backend.clear_agent_attribution(&agent_alias))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
+    }
+
+    /// Count agent attribution (async).
+    pub async fn count_agent_attribution(&self, agent_alias: &str) -> std::io::Result<usize> {
+        let backend = self.backend.clone();
+        let agent_alias = agent_alias.to_string();
+        tokio::task::spawn_blocking(move || backend.count_agent_attribution(&agent_alias))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Task join error: {e}")))
+            .and_then(|result| result)
     }
 }
 

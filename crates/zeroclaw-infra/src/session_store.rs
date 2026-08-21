@@ -33,22 +33,24 @@ impl SessionStore {
         let file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
+            Err(e) => return Err(std::io::Error::new(e.kind(), format!("Failed to open session file {}: {}", path.display(), e))),
         };
 
         let reader = std::io::BufReader::new(file);
         let mut messages = Vec::new();
 
-        for line in reader.lines() {
-            let line = line?; // Propagate line-read errors
+        for (line_num, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| {
+                std::io::Error::new(e.kind(), format!("Line {} in session file {}: {}", line_num + 1, path.display(), e))
+            })?; // Propagate line-read errors
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            // Skip malformed JSON lines silently (legacy behavior for corrupt data)
-            if let Ok(msg) = serde_json::from_str::<ChatMessage>(trimmed) {
-                messages.push(msg);
-            }
+            // F2: Malformed JSON rows must propagate as Err, not be silently skipped
+            let msg = serde_json::from_str::<ChatMessage>(trimmed)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Malformed JSON at line {} in session file {}: {}", line_num + 1, path.display(), e)))?;
+            messages.push(msg);
         }
 
         Ok(messages)
@@ -133,16 +135,20 @@ impl SessionStore {
         let entries = match std::fs::read_dir(&self.sessions_dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
+            Err(e) => return Err(std::io::Error::new(e.kind(), format!("Failed to read sessions directory {}: {}", self.sessions_dir.display(), e))),
         };
 
-        let sessions = entries
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let name = entry.file_name().into_string().ok()?;
-                name.strip_suffix(".jsonl").map(String::from)
-            })
-            .collect();
+        let mut sessions = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                std::io::Error::new(e.kind(), format!("Failed to read directory entry in {}: {}", self.sessions_dir.display(), e))
+            })?;
+            let name = entry.file_name().into_string()
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Invalid filename in {}: {:?}", self.sessions_dir.display(), entry.file_name())))?;
+            if let Some(key) = name.strip_suffix(".jsonl") {
+                sessions.push(key.to_string());
+            }
+        }
 
         Ok(sessions)
     }
@@ -378,10 +384,17 @@ mod tests {
         writeln!(file, "corrupt line").unwrap();
         writeln!(file, r#"{{"role":"assistant","content":"hi"}}"#).unwrap();
 
-        store.compact(key).unwrap();
+        // F2: load must return Err for corrupt data
+        let result = store.load(key);
+        assert!(result.is_err(), "F2: corrupted JSONL must return Err");
 
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(raw.trim().lines().count(), 2);
+        // compact still works - it loads via load() which now returns Err
+        // So we need to handle the error case in compact
+        let compact_result = store.compact(key);
+        assert!(
+            compact_result.is_err(),
+            "F2: compact on corrupt data must return Err"
+        );
     }
 
     #[test]
@@ -411,10 +424,14 @@ mod tests {
         writeln!(file, "this is not valid json").unwrap();
         writeln!(file, r#"{{"role":"assistant","content":"world"}}"#).unwrap();
 
-        let messages = store.load(key).unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].content, "hello");
-        assert_eq!(messages[1].content, "world");
+        // F2: load must return Err for malformed JSON
+        let result = store.load(key);
+        assert!(
+            result.is_err(),
+            "F2: corrupted JSONL must return Err, not skip corrupt lines"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

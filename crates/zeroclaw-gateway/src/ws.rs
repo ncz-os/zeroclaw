@@ -341,10 +341,10 @@ async fn handle_socket(
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
     let mut stored_messages = Vec::new();
-    if let Some(ref backend) = state.session_backend {
-        // Per F2: backend read errors must be logged and handled explicitly,
-        // not treated as "no history".
-        match backend.load(&session_key) {
+    if let Some(ref async_backend) = state.session_backend {
+        // F2: Use the async facade and handle errors explicitly
+        // Per the fallible-read contract, errors must be surfaced, not treated as "no history"
+        match async_backend.load(&session_key).await {
             Ok(messages) => {
                 if !messages.is_empty() {
                     message_count = messages.len();
@@ -869,8 +869,8 @@ fn session_queue_ws_error_code(error: &crate::session_queue::SessionQueueError) 
     }
 }
 
-fn persist_conversation_messages(
-    backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
+async fn persist_conversation_messages(
+    backend: &zeroclaw_infra::AsyncSessionBackend,
     session_key: &str,
     messages: &[zeroclaw_providers::ConversationMessage],
 ) {
@@ -880,7 +880,8 @@ fn persist_conversation_messages(
     // re-create the row that `DELETE /api/sessions/{id}` just wiped.
     if !backend
         .session_exists(session_key)
-        .expect("session_exists should succeed")
+        .await
+        .unwrap_or(false)
     {
         return;
     }
@@ -891,7 +892,7 @@ fn persist_conversation_messages(
         if message.role == "system" {
             continue;
         }
-        let _ = backend.append(session_key, message);
+        let _ = backend.append(session_key, message).await;
     }
 }
 
@@ -1275,7 +1276,8 @@ async fn process_chat_message(
         if let Some(ref backend) = state.session_backend {
             let still_exists = backend
                 .session_exists(session_key)
-                .expect("session_exists should succeed");
+                .await
+                .unwrap_or(false);
             if still_exists {
                 match &result {
                     Err(error) if !error.new_messages.is_empty() => {
@@ -1283,7 +1285,8 @@ async fn process_chat_message(
                             backend.as_ref(),
                             session_key,
                             &error.new_messages,
-                        );
+                        )
+                        .await;
                         if !has_assistant_chat_message(&error.new_messages) {
                             let marker = zeroclaw_runtime::i18n::get_required_cli_string(
                                 "turn-interrupted-by-user",
@@ -1370,7 +1373,7 @@ async fn process_chat_message(
     match result {
         Ok(outcome) => {
             if let Some(ref backend) = state.session_backend {
-                persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
+                persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages).await;
             }
 
             // Fire-and-forget memory consolidation so facts from WS sessions
@@ -1478,12 +1481,12 @@ async fn process_chat_message(
             if let Some(ref backend) = state.session_backend
                 && !e.new_messages.is_empty()
             {
-                persist_conversation_messages(backend.as_ref(), session_key, &e.new_messages);
+                persist_conversation_messages(backend.as_ref(), session_key, &e.new_messages).await;
             }
 
             // Set session state to error
             if let Some(ref backend) = state.session_backend {
-                let _ = backend.set_session_state(session_key, "error", Some(&turn_id));
+                let _ = backend.set_session_state(session_key, "error", Some(&turn_id)).await;
             }
 
             ::zeroclaw_log::record!(
@@ -2058,21 +2061,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn persist_conversation_messages_skips_deleted_session() {
+    #[tokio::test]
+    async fn persist_conversation_messages_skips_deleted_session() {
         use zeroclaw_providers::{ChatMessage, ConversationMessage};
         let backend = DeletedSessionBackend {
             append_calls: std::sync::Mutex::new(Vec::new()),
         };
+        let async_backend = zeroclaw_infra::AsyncSessionBackend::new(std::sync::Arc::new(backend));
         let messages = vec![
             ConversationMessage::Chat(ChatMessage::user("hi")),
             ConversationMessage::Chat(ChatMessage::assistant("[interrupted by user]")),
         ];
 
-        persist_conversation_messages(&backend, "gw_deleted", &messages);
+        persist_conversation_messages(&async_backend, "gw_deleted", &messages).await;
 
         assert!(
-            backend.append_calls.lock().unwrap().is_empty(),
+            async_backend.backend.append_calls.lock().unwrap().is_empty(),
             "persist_conversation_messages must not resurrect a session whose \
              session_exists() returned false (see #7126)"
         );

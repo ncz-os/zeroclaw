@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::task;
 use zeroclaw_config::schema::Config;
 
 use zeroclaw_api::jsonrpc::error_codes::*;
@@ -627,7 +628,7 @@ impl RpcDispatcher {
             return true;
         }
         if let Some(backend) = self.ctx.session_backend.as_ref()
-            && backend.count_agent_attribution(from).unwrap_or(0) > 0
+            && backend.count_agent_attribution(from).await.unwrap_or(0) > 0
         {
             return true;
         }
@@ -934,19 +935,22 @@ impl RpcDispatcher {
             .ctx
             .session_backend
             .as_ref()
-            .map(|b| match b.list_sessions_with_metadata() {
-                Ok(metadata) => metadata.len(),
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_attrs(::serde_json::json!({
-                                "error": format!("{e:#}"),
-                            })),
-                        "Failed to list session metadata for status"
-                    );
-                    0
-                }
+            .map(|b| {
+                // Spawn blocking for sync compatibility - this is a status check, not a hot path
+                let backend = b.backend.clone();
+                task::block_in_place(|| backend.list_sessions_with_metadata())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or_else(|e| {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                                .with_attrs(::serde_json::json!({
+                                    "error": format!("{e:#}"),
+                                })),
+                            "Failed to list session metadata for status"
+                        );
+                        0
+                    })
             })
             .unwrap_or(0);
         let total = ids.len().max(persisted_count);
@@ -1315,8 +1319,8 @@ impl RpcDispatcher {
             crate::rpc::types::ChatMode::Chat => {
                 if let Some(ref backend) = self.ctx.session_backend {
                     let session_key = format!("rpc_{session_id}");
-                    let _ = backend.set_session_agent_alias(&session_key, &req.agent_alias);
-                    let stored = backend.load(&session_key).map_err(|e| {
+                    let _ = backend.set_session_agent_alias(&session_key, &req.agent_alias).await;
+                    let stored = backend.load(&session_key).await.map_err(|e| {
                         rpc_err(INTERNAL_ERROR, format!("Failed to load session: {e}"))
                     })?;
                     if !stored.is_empty() {
@@ -1907,15 +1911,15 @@ impl RpcDispatcher {
             crate::rpc::types::ChatMode::Chat => {
                 if let Some(ref backend) = self.ctx.session_backend {
                     let key = format!("rpc_{sid}");
-                    let _ = backend.append(&key, &ChatMessage::user(&prompt));
+                    let _ = backend.append(&key, &ChatMessage::user(&prompt)).await;
                     match &outcome {
                         Ok(TurnOutcome::Completed { text, .. }) => {
-                            let _ = backend.append(&key, &ChatMessage::assistant(text));
+                            let _ = backend.append(&key, &ChatMessage::assistant(text)).await;
                         }
                         Ok(TurnOutcome::Cancelled { partial_text, .. })
                             if !partial_text.is_empty() =>
                         {
-                            let _ = backend.append(&key, &ChatMessage::assistant(partial_text));
+                            let _ = backend.append(&key, &ChatMessage::assistant(partial_text)).await;
                         }
                         _ => {}
                     }
@@ -2212,6 +2216,7 @@ impl RpcDispatcher {
             if keyword.trim().is_empty() {
                 backend
                     .list_sessions_with_metadata()
+                    .await
                     .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?
             } else {
                 use zeroclaw_infra::session_backend::SessionQuery;
@@ -2220,6 +2225,7 @@ impl RpcDispatcher {
                         keyword: Some(keyword.clone()),
                         limit: req.limit,
                     })
+                    .await
                     .map_err(|e| {
                         rpc_err(INTERNAL_ERROR, format!("Failed to search sessions: {e}"))
                     })?
@@ -2227,6 +2233,7 @@ impl RpcDispatcher {
         } else {
             backend
                 .list_sessions_with_metadata()
+                .await
                 .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?
         };
 
@@ -2316,6 +2323,7 @@ impl RpcDispatcher {
         for key in &candidates {
             let loaded = backend
                 .load(key)
+                .await
                 .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to load session: {e}")))?;
             if !loaded.is_empty() {
                 raw = loaded;
@@ -2393,7 +2401,7 @@ impl RpcDispatcher {
             format!("gw_{}", req.session_id),
         ];
         for key in &candidates {
-            match backend.get_session_state(key) {
+            match backend.get_session_state(key).await {
                 Ok(Some(ss)) => {
                     return to_result(SessionStateResult {
                         session_id: req.session_id,
@@ -3307,7 +3315,7 @@ impl RpcDispatcher {
         }
 
         if let Some(backend) = &self.ctx.session_backend {
-            match backend.rename_agent_attribution(from, to) {
+            match backend.rename_agent_attribution(from, to).await {
                 Ok(n) => sessions_repointed = n,
                 Err(e) => warnings.push(format!("session attribution rename: {e}")),
             }
@@ -3365,10 +3373,11 @@ impl RpcDispatcher {
         let rpc_counts = self.ctx.sessions.count_by_agent().await;
         let mut backend_counts = std::collections::HashMap::<String, usize>::new();
         if let Some(ref backend) = self.ctx.session_backend {
-            for meta in backend
+            let metadata = backend
                 .list_sessions_with_metadata()
-                .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?
-            {
+                .await
+                .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Failed to list sessions: {e}")))?;
+            for meta in metadata {
                 let alias = meta.agent_alias.or_else(|| {
                     meta.channel_id
                         .as_deref()

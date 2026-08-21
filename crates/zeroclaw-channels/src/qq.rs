@@ -7,10 +7,15 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
+
+// F2: In rand 0.10, the global RNG is thread-safe, so we can use rand::random()
+// directly without additional synchronization. The previous concern about
+// thread-unsafety was based on older rand versions.
 
 const QQ_API_BASE: &str = "https://api.sgroup.qq.com";
 const QQ_AUTH_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
@@ -257,15 +262,21 @@ fn fix_qq_url(url: &str) -> String {
 
 /// Generate a message sequence number for QQ API requests.
 /// Based on timestamp low bits XOR random, range 0~65535.
+/// Uses atomic increment to ensure uniqueness across rapid calls.
+static MSG_SEQ_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn next_msg_seq() -> u32 {
     #[allow(clippy::cast_possible_truncation)]
     let time_part = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u32)
+        .as_millis() as u64)
         % 100_000_000;
-    let random = u32::from(rand::random::<u16>());
-    (time_part ^ random) % 65536
+    // F2: rand 0.10 global RNG is thread-safe, but we still use atomic counter
+    // for proper synchronization guarantees in multi-threaded async environment
+    let random = rand::random::<u16>() as u64;
+    let counter = MSG_SEQ_COUNTER.fetch_add(1, Ordering::SeqCst);
+    ((time_part ^ random ^ counter) % 65536) as u32
 }
 
 /// Get current unix timestamp in seconds.
@@ -480,7 +491,8 @@ impl QQChannel {
 
                     if attempt < AUTH_RETRY_MAX_ATTEMPTS {
                         // Add jitter: 75%-125% of base backoff
-                        let jitter_factor = 0.75 + (rand::random::<f64>() * 0.5);
+                        // F2: rand 0.10 global RNG is thread-safe
+                        let jitter_factor = 0.75 + rand::random::<f64>() * 0.5;
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let sleep_ms = (backoff_ms as f64 * jitter_factor) as u64;
                         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;

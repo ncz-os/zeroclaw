@@ -133,6 +133,7 @@ use zeroclaw_channels::wati::WatiChannel;
 use zeroclaw_channels::whatsapp::WhatsAppChannel;
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
+use zeroclaw_infra::AsyncSessionBackend;
 use zeroclaw_infra::session_backend::SessionBackend;
 use zeroclaw_memory::{self, Memory, MemoryCategory};
 use zeroclaw_providers::{self, ModelProvider};
@@ -519,8 +520,10 @@ pub struct AppState {
     pub path_prefix: String,
     /// Filesystem path to `web/dist/` for serving the dashboard (None = API-only)
     pub web_dist_dir: Option<std::path::PathBuf>,
-    /// Session backend for persisting gateway WS chat sessions
-    pub session_backend: Option<Arc<dyn SessionBackend>>,
+    /// Async facade for session backend (SQLite / JSONL) for gateway WS chat
+    /// sessions. This is the shared async facade (F1) - ONE per process,
+    /// injected at bootstrap. `None` when persistence is disabled.
+    pub session_backend: Option<Arc<AsyncSessionBackend>>,
     /// Per-session actor queue for serializing concurrent turns
     pub session_queue: Arc<session_queue::SessionActorQueue>,
     /// Device registry for paired device management
@@ -1182,7 +1185,7 @@ pub async fn run_gateway(
             })
     };
 
-    let session_backend: Option<Arc<dyn SessionBackend>> = if config.gateway.session_persistence {
+    let session_backend: Option<Arc<AsyncSessionBackend>> = if config.gateway.session_persistence {
         match zeroclaw_infra::make_session_backend(
             &config.data_dir,
             &config.channels.session_backend,
@@ -1196,6 +1199,9 @@ pub async fn run_gateway(
                         config.channels.session_backend
                     )
                 );
+                // F1: Wrap the synchronous backend in the shared async facade
+                let async_backend = Arc::new(AsyncSessionBackend::new(backend.clone()));
+                // Run cleanup on the sync backend (bootstrap path, not async)
                 if config.gateway.session_ttl_hours > 0
                     && let Ok(cleaned) = backend.cleanup_stale(config.gateway.session_ttl_hours)
                     && cleaned > 0
@@ -1207,7 +1213,7 @@ pub async fn run_gateway(
                         "Cleaned up stale gateway sessions"
                     );
                 }
-                Some(backend)
+                Some(async_backend)
             }
             Err(e) => {
                 ::zeroclaw_log::record!(
