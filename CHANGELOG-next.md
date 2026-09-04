@@ -13,6 +13,10 @@ ZeroClaw v0.8.4 is a maintenance and hardening release spanning **262 commits** 
 
 ## What's New
 
+### Web and Search
+
+- **Web search output caps and scrape hygiene** (#9824): all six `web_search` provider parsers now cap per-result content and total output; the DuckDuckGo path rotates realistic browser headers and throttles consecutive scrapes; the tool is registered behind the standard rate limiter; provider-blocked and SearXNG misconfiguration errors now give the model and operator accurate next steps.
+
 ### Memory and Retrieval
 
 - Add opt-in retrieval caching, a gated rerank stage, typed memory classification and fact extraction, configuration validation, migration reindex hooks, and content scanning at write and recall boundaries (#8897, #8895, #8900, #8899, #8984).
@@ -42,6 +46,8 @@ ZeroClaw v0.8.4 is a maintenance and hardening release spanning **262 commits** 
 - Validate required credentials for enabled Signal and Voice Call aliases while continuing to allow incomplete disabled aliases (#9524).
 
 ### Providers and Runtime
+
+- Add opt-in Anthropic `thinking.display` beta support: a new `agent.thinking.display` config knob (`off` (default) / `omitted` / `updates` / `summarized`) threads through native thinking params, and requests that set it carry the `thinking-display-updates-2026-08-18` beta header (#10529). Display-enabled requests now use the streaming response path, so readable thinking progress arrives live; signed reasoning payloads travel on a replay-only channel and never appear in user-visible events. Adaptive-only models (Opus 4.7, Fable 5.1) get `adaptive`-style thinking requests instead of the rejected fixed-budget shape; signature-only reasoning blocks (e.g. under `omitted`) are retained for exact tool-use replay. Anthropic thinking progress is human-readable everywhere (previously the raw signed JSON could reach thinking surfaces).
 
 - Default newly created persisted OpenAI model slots to the Responses API with native tool calling, without changing existing persisted entries or bare provider references (#9021).
 - Propagate OpenAI Responses usage and carry model context-window metadata from the models.dev catalog (#9360, #9347).

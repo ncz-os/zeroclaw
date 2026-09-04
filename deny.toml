@@ -9,19 +9,6 @@ unmaintained = "all"
 yanked = "deny"
 # Ignore known unmaintained transitive deps we cannot easily replace
 ignore = [
-    # bincode -- unmaintained advisory (informational only, no CVE); team ceased
-    # development after a doxxing/harassment incident; advisory affects all
-    # versions including 2.x. In our tree, bincode is pulled in only via
-    # probe-rs 0.31's `builtin-targets` feature (precompiled chip definitions)
-    # behind the optional `probe` cargo feature on zeroclaw-tools and
-    # zeroclaw-hardware. probe-rs is the de facto Rust embedded debug toolchain
-    # with no alternative; replacing builtin-targets requires runtime Registry
-    # construction (separate work). Not in any default build path.
-    { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained (informational, no CVE); transitive via probe-rs `builtin-targets`; behind optional `probe` feature; awaiting probe-rs upstream serialization migration" },
-    # rand -- re-entrancy unsoundness via custom global logger; fixed in rand 0.8.6
-    # for the 0.8.x copy in our tree; the 0.7.x copy predates rand::rng() entirely
-    # and is not affected; the 0.9.x copy is outside the advisory's affected range
-    { id = "RUSTSEC-2026-0097", reason = "rand re-entrancy unsoundness; 0.8.6 copy is patched; 0.7.x copy predates rand::rng() and is not affected" },
     # rustls-pemfile -- unmaintained, functionality moved to rustls-pki-types;
     # transitive dep, upstream migration tracked
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive dep awaiting upstream migration to rustls-pki-types" },
@@ -60,10 +47,17 @@ ignore = [
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident unmaintained; tracking #8519" },
     # macro/font helpers unmaintained (transitive); tracking #8519.
     # RUSTSEC-2024-0370 (proc-macro-error) was dropped when zeroclaw-desktop
-    # (Tauri) was removed in PR #8544.
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive macro helper; tracking #8519" },
+    # (Tauri) was removed in PR #8544. proc-macro-error2 is a separate,
+    # still-live transitive dep reached both via matrix-sdk dev-deps
+    # (aquamarine, in zeroclaw-channels) and elsewhere in the workspace.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive macro helper via matrix-sdk dev-deps; tracking #8519" },
     { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; transitive derive helper; tracking #8519" },
-    { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained (repo archived 2026-05-03); no safe upgrade exists; transitive via imbl -> imbl-sized-chunks; tracking #8519" },
+    # bitmaps -- repository archived 2026-05-03, all versions affected, no safe
+    # upgrade available. Reached transitively: matrix-sdk -> eyeball-im -> imbl
+    # -> bitmaps (and also via imbl -> imbl-sized-chunks). Upstream tracking
+    # issue matrix-org/matrix-rust-sdk#6859 asks matrix-sdk to move off the
+    # imbl stack; drop this entry once a matrix-sdk release no longer pulls it.
+    { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained (repo archived 2026-05-03); no safe upgrade exists; transitive via matrix-sdk -> eyeball-im -> imbl (also imbl -> imbl-sized-chunks); tracking #8519 and upstream matrix-org/matrix-rust-sdk#6859" },
 ]
 
 [licenses]
@@ -94,6 +88,9 @@ unused-allowed-license = "allow"
 # remove skips as dependency bumps resolve them.
 multiple-versions = "deny"
 wildcards = "deny"
+deny = [
+    { crate = "lru:<0.18.2", wrappers = ["nostr-database", "nostr-relay-pool"], reason = "RUSTSEC-2026-0253; temporary Nostr cache exception tracked in #9602" },
+]
 
 # Pre-existing duplicate-version crates as of 2026-07-01.
 # Each skip entry removes one specific duplicate version from the
@@ -125,6 +122,11 @@ version = "=2.5.3"
 [[bans.skip]]
 name = "foldhash"
 version = "=0.1.5"
+
+[[bans.skip]]
+name = "lru"
+version = "=0.16.4"
+reason = "temporary Nostr 0.44 duplicate tracked in #9602"
 
 [[bans.skip]]
 name = "getrandom"
