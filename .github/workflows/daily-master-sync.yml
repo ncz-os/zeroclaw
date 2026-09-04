@@ -1,0 +1,82 @@
+name: Daily master sync with upstream
+
+# WHY THIS EXISTS
+# master carries upstream code PLUS a small local overlay (CI tweaks and a
+# few real security/dependency fixes) -- see the incident writeup at
+# mem_1788554401504_43c396. Unlike `upstream-head` (a pure fast-forward
+# mirror maintained by daily-head-sync-build.yml), master can never be
+# simply fast-forwarded because it carries its own commits. Nothing kept
+# master in sync going forward after the one-off manual resync on
+# 2026-08-04 (commit b39838c3) -- it silently drifted 421 commits / ~1 month
+# behind upstream zeroclaw-labs/zeroclaw while native-builds.yml (in
+# ncz-os/zoder) kept building from it and reporting green every day.
+#
+# This job runs a real merge every day and pushes it IF AND ONLY IF the
+# merge is clean. A conflict means a human resolves it by hand -- the job
+# FAILS LOUDLY and pushes nothing, because a silent skip here is exactly
+# the failure mode that let master drift undetected for a month.
+
+on:
+  schedule:
+    # 08:30 UTC -- after daily-head-sync-build.yml's upstream-head refresh
+    # (08:00 UTC) and before ncz-os/zoder's native-builds.yml (09:15 UTC),
+    # so a build never reads a master mid-sync.
+    - cron: "30 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: master-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master
+          # Same token as daily-head-sync-build.yml. A merge onto master can
+          # touch .github/workflows/* (upstream routinely does), and GitHub
+          # refuses to let the default GitHub App token create or update
+          # files under that path -- SYNC_TOKEN is a personal token carrying
+          # the `workflow` scope, which is the only thing permitted to push
+          # those paths.
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Attempt merge of upstream/master into master
+        run: |
+          set -euo pipefail
+          git config user.name "ncz-os-sync-bot"
+          git config user.email "sync@ncz-os.local"
+          git remote add upstream https://github.com/zeroclaw-labs/zeroclaw.git
+          git fetch upstream master
+
+          BEFORE="$(git rev-parse HEAD)"
+          UP="$(git rev-parse upstream/master)"
+          echo "master:            $BEFORE"
+          echo "upstream/master:   $UP"
+
+          if [ "$BEFORE" = "$UP" ]; then
+            echo "already current -- nothing to do"
+            exit 0
+          fi
+
+          BEHIND="$(git rev-list --count HEAD..upstream/master)"
+          echo "master is $BEHIND commit(s) behind upstream/master"
+
+          if git merge upstream/master --no-edit \
+              -m "merge: daily sync master with upstream zeroclaw-labs master ($(date -u +%Y-%m-%d))"; then
+            git push origin HEAD:master
+            echo "::notice::synced $BEHIND commit(s) from upstream zeroclaw-labs/zeroclaw"
+          else
+            echo "::error::master has a merge conflict with upstream/master ($BEHIND commits behind) that needs human resolution."
+            echo "conflicting files:"
+            git diff --name-only --diff-filter=U
+            git merge --abort
+            echo "::error::merge aborted -- master was NOT changed and NOT pushed. Resolve by hand: git fetch upstream master && git merge upstream/master"
+            exit 1
+          fi
