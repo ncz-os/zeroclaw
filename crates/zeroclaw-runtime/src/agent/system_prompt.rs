@@ -114,6 +114,12 @@ fn append_project_context(
 
 /// Build the default system prompt.
 ///
+/// This convenience wrapper (like [`build_system_prompt_with_tool_calls`] and
+/// [`build_system_prompt_with_mode`]) describes a messaging-channel surface, so
+/// existing channel callers keep their prompt unchanged. A caller that is not
+/// a messaging channel should use [`build_system_prompt_with_mode_and_autonomy`]
+/// and pass `is_messaging_channel_turn: false`.
+///
 /// Reports no shell: callers that know their runtime adapter should use
 /// [`build_system_prompt_with_mode_and_autonomy`] and pass its
 /// `shell_profile` so the model is told which dialect to write.
