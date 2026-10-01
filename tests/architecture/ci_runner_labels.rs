@@ -1,4 +1,6 @@
 //! Architecture gate for Quality Gate and Advisory Windows Tests runner selection.
+//! Forks use hosted runners and the matching cache because upstream Blacksmith
+//! labels are available only to the zeroclaw-labs organization.
 //!
 //! The compile-heavy jobs name their Blacksmith runner label directly instead
 //! of reading it from a `fmt` output. `runs-on` resolves before a job is
@@ -18,7 +20,7 @@ use regex::Regex;
 
 /// The one runner label the compile-heavy fleet may use. Moving the fleet means
 /// changing this constant and every job below in the same reviewed commit.
-const RUNNER_LABEL: &str = "blacksmith-8vcpu-ubuntu-2404";
+const RUNNER_LABEL: &str = "${{ github.repository_owner == 'zeroclaw-labs' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}";
 
 /// The runner label for housekeeping jobs: formatting, change detection,
 /// repository guards, docs and policy gates, the Nix checks, the container
@@ -28,7 +30,7 @@ const RUNNER_LABEL: &str = "blacksmith-8vcpu-ubuntu-2404";
 /// ran untouched, so the whole required gate stalled on jobs whose combined
 /// work is minutes. Hosting them on Blacksmith removes GitHub's hosted pool
 /// from the required gate's critical path entirely.
-const HOUSEKEEPING_LABEL: &str = "blacksmith-4vcpu-ubuntu-2404";
+const HOUSEKEEPING_LABEL: &str = "${{ github.repository_owner == 'zeroclaw-labs' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}";
 
 /// Every housekeeping job in the two workflows on the Blacksmith 4-vCPU class.
 /// Workflow-qualified IDs keep same-named jobs in different workflows distinct.
@@ -90,9 +92,9 @@ const REUSABLE_COMPILE_JOBS: [&str; 1] = ["crates-preflight"];
 /// GitHub-hosted cache; `'false'` belongs to the web job, which does not
 /// compile the workspace.
 const ALLOWED_CACHE_INPUTS: [&str; 3] = [
-    "'true'",
+    "${{ github.repository_owner == 'zeroclaw-labs' }}",
     "'false'",
-    "${{ matrix.target == 'x86_64-unknown-linux-gnu' }}",
+    "${{ github.repository_owner == 'zeroclaw-labs' && matrix.target == 'x86_64-unknown-linux-gnu' }}",
 ];
 
 fn ci_workflow() -> String {
