@@ -8,18 +8,6 @@ ignore = [
     # Each entry below summarizes the corresponding rationale in deny.toml.
     # Re-evaluate both files; remove each entry once that tool's criteria are met.
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained; transitive dep awaiting upstream migration to rustls-pki-types
-    "RUSTSEC-2026-0173",  # proc-macro-error2 unmaintained; in cargo-deny's resolved graph via matrix-sdk dev-deps; tracking #8519
-    "RUSTSEC-2026-0247",  # bitmaps unmaintained; matrix-sdk reaches imbl directly and via eyeball-im; tracking #9899 and matrix-org/matrix-rust-sdk#6859
-
-    # ── Informational only (no tracking issue required) ────────────────────
-    "RUSTSEC-2026-0222",  # wasmtime: stores can mix up type indices between
-                          # engines. 3.8 low. No fix exists in the 45.x line -
-                          # the advisory's fixed versions are >=24.0.12,
-                          # >=36.0.13, >=46.0.2 or >=47.0.3, so clearing it
-                          # means a semver-major wasmtime bump that would need
-                          # the cranelift, winch and pulley backends
-                          # revalidated. Tracked, not dismissed: revisit when
-                          # wasmtime is next bumped for other reasons.
 
     # ── cargo-audit reads the full Cargo.lock, so it flags advisories for
     # crates that cargo-deny (graph-aware) does not pull into the resolved
