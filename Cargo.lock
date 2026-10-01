@@ -14034,7 +14034,6 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "libc",
- "lru 0.18.4",
  "parking_lot",
  "proc-macro2",
  "rcgen",

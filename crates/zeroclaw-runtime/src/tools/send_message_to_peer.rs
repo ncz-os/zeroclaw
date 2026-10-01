@@ -1696,28 +1696,10 @@ mod tests {
         let tracker = CostTracker::get_or_init_global(config.cost.clone(), &config.data_dir)
             .expect("execute() must have resolved a process-global cost tracker for an enabled cost config");
 
-        // The recipient's turn runs inside a detached `zeroclaw_spawn::spawn!`
-        // task that `execute()` does not join. Poll for its completion with a
-        // bounded, sleep-free yield loop (the same pattern already used for
-        // detached-task synchronization in `rpc/dispatch.rs`), never a fixed
-        // sleep.
-        let mut recipient_summary = None;
-        for _ in 0..20_000 {
-            let summary = tracker
-                .get_summary_for_agent("recipient")
-                .expect("recipient cost summary should be queryable");
-            if summary.request_count >= 1 {
-                recipient_summary = Some(summary);
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let recipient_summary = recipient_summary.expect(
-            "the detached recipient turn must complete and record usage against the \
-             recipient alias; if this fires, execute() is no longer threading the \
-             cost-tracking scope into the spawned process_message future",
-        );
-
+        // Await the durable task completion instead of counting scheduler yields:
+        // a fixed iteration count can expire before the turn gets CPU under the
+        // parallel runtime suite. Completion is recorded after process_message
+        // has finished recording the recipient's usage.
         let terminal_snapshot = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = task_store
@@ -1739,6 +1721,9 @@ mod tests {
             Some("peer turn complete")
         );
         assert!(terminal_snapshot.error.is_none());
+        let recipient_summary = tracker
+            .get_summary_for_agent("recipient")
+            .expect("completed recipient cost summary should be queryable");
 
         // (1) Usage lands on the recipient alias in the per-agent ledger,
         // through the REAL tool boundary end to end - not just the helper.

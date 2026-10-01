@@ -174,6 +174,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: head-${{ steps.prov.outputs.stamp }}
+          target_commitish: ${{ needs.sync.outputs.sha }}
           name: "HEAD ${{ steps.prov.outputs.stamp }} (${{ steps.prov.outputs.sha_short }})"
           body: |
             Daily build of upstream HEAD, tracked for fleet distribution.

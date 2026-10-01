@@ -166,9 +166,6 @@ ring = { version = "0.17", optional = true }
 # Async traits
 async-trait = "0.1"
 
-# LRU cache for bounded sender state
-lru = { version = "0.18", optional = true }
-
 # Memory / persistence (migration.rs, behind agent-runtime)
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

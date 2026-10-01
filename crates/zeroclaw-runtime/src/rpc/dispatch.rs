@@ -20737,8 +20737,11 @@ mod tests {
         };
         let (result, successor) = tokio::join!(operation, replace);
         let err = result.expect_err("a replaced session cannot be configured by the old owner");
-        assert_eq!(err.code, SESSION_NOT_FOUND, "{}", err.message);
-        assert!(err.message.contains("Session changed while queued"));
+        assert_eq!(err.code, FORBIDDEN, "{}", err.message);
+        assert_eq!(
+            err.message, "Session not found or not owned by this principal",
+            "scoped callers must not learn that another incarnation exists"
+        );
         assert_eq!(sessions.get_generation("cfg").await, Some(successor));
         assert_eq!(
             sessions
