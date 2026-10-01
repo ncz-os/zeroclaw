@@ -2684,6 +2684,15 @@ impl RpcDispatcher {
     }
 
     fn stale_session_incarnation_error(&self) -> JsonRpcError {
+        // Local transport trust does not make a roster principal unscoped.
+        // Generation validation can run before admitted-session revalidation;
+        // do not reveal a replacement through a different error on that path.
+        if self.scoped_principal_id().is_some() {
+            return rpc_err(
+                FORBIDDEN,
+                "Session not found or not owned by this principal",
+            );
+        }
         let (code, message) = match self.access_policy {
             RpcAccessPolicy::TrustedLocal => (SESSION_NOT_FOUND, "Session changed while queued"),
             RpcAccessPolicy::RemoteSessionOwner => {
@@ -20705,6 +20714,24 @@ mod tests {
         assert_eq!(error.code, SESSION_NOT_FOUND);
         assert_eq!(sessions.get_generation(sid).await, successor);
         assert!(acp_store.load_session(sid).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_incarnation_errors_preserve_principal_scope_before_revalidation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = two_user_config(&tmp);
+        let data_dir = config.data_dir.clone();
+        let (fixture, _, _, _) = make_persistence_test_dispatcher(config, &data_dir);
+        let scoped = scoped_dispatcher(&fixture.ctx, 4242).await;
+        let error = scoped.stale_session_incarnation_error();
+        assert_eq!(error.code, FORBIDDEN);
+        assert_eq!(
+            error.message,
+            "Session not found or not owned by this principal"
+        );
+        let unscoped = fixture.stale_session_incarnation_error();
+        assert_eq!(unscoped.code, SESSION_NOT_FOUND);
+        assert_eq!(unscoped.message, "Session changed while queued");
     }
 
     /// Configure captures the authorized generation and re-validates owner and
